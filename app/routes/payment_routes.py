@@ -14,7 +14,16 @@ def get_payments():
     employee_id = claims['id']
     payments = payment_crud.get_all_payments(company_id, user_role,employee_id)
     return jsonify(payments), 200
-
+@main.route('/bank-accounts/list', methods=['GET'])
+@jwt_required()
+def get_bank_accounts():
+    claims = get_jwt()
+    company_id = claims['company_id']
+    try:
+        result = payment_crud.fetch_active_bank_accounts(company_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'error': 'Failed to fetch bank accounts', 'message': str(e)}), 400
 @main.route('/payments/add', methods=['POST'])
 @jwt_required()
 def add_new_payment():

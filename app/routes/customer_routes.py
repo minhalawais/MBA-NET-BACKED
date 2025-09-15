@@ -13,13 +13,13 @@ UPLOAD_FOLDER = os.path.join(current_app.root_path, 'uploads/cnic_images')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-def allowed_file(filename):
+async def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # New route for handling immediate file uploads
 @main.route('/customers/upload-file/<string:file_type>', methods=['POST'])
 @jwt_required()
-def upload_customer_file(file_type):
+async def upload_customer_file(file_type):
     claims = get_jwt()
     company_id = claims['company_id']
     
@@ -62,17 +62,44 @@ def upload_customer_file(file_type):
 
 @main.route('/customers/list', methods=['GET'])
 @jwt_required()
-def get_customers():
+async def get_customers():
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
     employee_id = get_jwt_identity()
-    customers = customer_crud.get_all_customers(company_id, user_role, employee_id)
+    customers = await customer_crud.get_all_customers(company_id, user_role, employee_id)
     return jsonify(customers), 200
+@main.route('/customers/check-internet-id/<string:internet_id>', methods=['GET'])
+@jwt_required()
+def check_internet_id_availability(internet_id):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    existing_customer = customer_crud.check_existing_internet_id(internet_id, company_id)
+    
+    return jsonify({
+        'available': existing_customer is None,
+        'message': 'Internet ID is available' if existing_customer is None else 'Internet ID already exists'
+    }), 200
+
+@main.route('/customers/check-cnic/<string:cnic>', methods=['GET'])
+@jwt_required()
+def check_cnic_availability(cnic):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    existing_customer = customer_crud.check_existing_cnic(cnic, company_id)
+    
+    return jsonify({
+        'available': existing_customer is None,
+        'message': 'CNIC is available' if existing_customer is None else 'CNIC already exists'
+    }), 200
+
+
 
 @main.route('/customers/add', methods=['POST'])
 @jwt_required()
-def add_new_customer():
+async def add_new_customer():
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
@@ -83,101 +110,131 @@ def add_new_customer():
     data = request.form.to_dict()
     data['company_id'] = company_id
     
-    # Handle file paths from previous uploads
-    for file_field in ['cnic_front_image', 'cnic_back_image', 'agreement_document']:
-        if file_field in data and data[file_field]:
-            # The file path should already be the relative path from the upload
-            pass
+    validation_errors = await customer_crud.validate_customer_data(data, is_update=False)
+    print('Validation Errors: ',validation_errors)
+    if validation_errors:
+        return jsonify({'errors': validation_errors}), 400
     
     try:
-        new_customer = customer_crud.add_customer(data, user_role, current_user_id, ip_address, user_agent, company_id)
+        # Check Internet ID uniqueness
+        if customer_crud.check_existing_internet_id(data['internet_id'], company_id):
+            validation_errors['internet_id'] = 'Internet ID already exists'
+        
+        # Check CNIC uniqueness
+        if customer_crud.check_existing_cnic(data['cnic'], company_id):
+            validation_errors['cnic'] = 'CNIC already exists'
+        
+        if validation_errors:
+            return jsonify({'errors': validation_errors}), 400
+        
+        new_customer = await customer_crud.add_customer(data, user_role, current_user_id, ip_address, user_agent, company_id)
         return jsonify({'message': 'Customer added successfully', 'id': str(new_customer.id)}), 201
+        
     except Exception as e:
         return jsonify({'error': 'Failed to add customer', 'message': str(e)}), 400
 
-    
 @main.route('/customers/update/<string:id>', methods=['PUT'])
 @jwt_required()
-def update_existing_customer(id):
+async def update_existing_customer(id):
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
     current_user_id = get_jwt_identity()
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
-    data = request.json
-    updated_customer = customer_crud.update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent)
-    if updated_customer:
-        return jsonify({'message': 'Customer updated successfully'}), 200
-    return jsonify({'message': 'Customer not found'}), 404
+    data = request.form.to_dict()
+    data['company_id'] = company_id
+    validation_errors = await customer_crud.validate_customer_data(data, is_update=True, customer_id=id)
+    if validation_errors:
+        print('Validation Errors: ',validation_errors)
+        return jsonify({'errors': validation_errors}), 400
+    
+    try:
+        if data.get('cnic'):
+            existing_cnic_customer = await customer_crud.check_existing_cnic(data['cnic'], company_id)
+            if existing_cnic_customer and str(existing_cnic_customer.id) != id:
+                validation_errors['cnic'] = 'CNIC already exists'
+        
+        if validation_errors:
+            return jsonify({'errors': validation_errors}), 400
+        
+        updated_customer = await customer_crud.update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent)
+        if updated_customer:
+            return jsonify({'message': 'Customer updated successfully'}), 200
+        return jsonify({'message': 'Customer not found'}), 404
+        
+    except Exception as e:
+        print('Error: ',str(e))
+        return jsonify({'error': 'Failed to update customer', 'message': str(e)}), 400
+
 
 @main.route('/customers/delete/<string:id>', methods=['DELETE'])
 @jwt_required()
-def delete_existing_customer(id):
+async def delete_existing_customer(id):
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
     current_user_id = get_jwt_identity()
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
-    if customer_crud.delete_customer(id, company_id, user_role, current_user_id, ip_address, user_agent):
+    if await customer_crud.delete_customer(id, company_id, user_role, current_user_id, ip_address, user_agent):
         return jsonify({'message': 'Customer deleted successfully'}), 200
     return jsonify({'message': 'Customer not found'}), 404
 
 @main.route('/customers/toggle-status/<string:id>', methods=['PATCH'])
 @jwt_required()
-def toggle_customer_active_status(id):
+async def toggle_customer_active_status(id):
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
     current_user_id = get_jwt_identity()
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
-    customer = customer_crud.toggle_customer_status(id, company_id, user_role, current_user_id, ip_address, user_agent)
+    customer = await customer_crud.toggle_customer_status(id, company_id, user_role, current_user_id, ip_address, user_agent)
     if customer:
         return jsonify({'message': f"Customer {'activated' if customer.is_active else 'deactivated'} successfully"}), 200
     return jsonify({'message': 'Customer not found'}), 404
 
 @main.route('/customers/<string:id>', methods=['GET'])
 @jwt_required()
-def get_customer_details(id):
+async def get_customer_details(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    customer = customer_crud.get_customer_details(id, company_id)
+    customer = await customer_crud.get_customer_details(id, company_id)
     if customer:
         return jsonify(customer), 200
     return jsonify({'message': 'Customer not found'}), 404
 
 @main.route('/invoices/customer/<string:id>', methods=['GET'])
 @jwt_required()
-def get_customer_invoices(id):
+async def get_customer_invoices(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    invoices = customer_crud.get_customer_invoices(id, company_id)
+    invoices = await customer_crud.get_customer_invoices(id, company_id)
     return jsonify(invoices), 200
 
 @main.route('/payments/customer/<string:id>', methods=['GET'])
 @jwt_required()
-def get_customer_payments(id):
+async def get_customer_payments(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    payments = customer_crud.get_customer_payments(id, company_id)
+    payments = await customer_crud.get_customer_payments(id, company_id)
     return jsonify(payments), 200
 
 @main.route('/complaints/customer/<string:id>', methods=['GET'])
 @jwt_required()
-def get_customer_complaints(id):
+async def get_customer_complaints(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    complaints = customer_crud.get_customer_complaints(id, company_id)
+    complaints = await customer_crud.get_customer_complaints(id, company_id)
     return jsonify(complaints), 200
 
 @main.route('/customers/cnic-front-image/<string:id>', methods=['GET'])
 @jwt_required()
-def get_cnic_front_image(id):
+async def get_cnic_front_image(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    customer = customer_crud.get_customer_cnic(id, company_id)
+    customer = await customer_crud.get_customer_cnic(id, company_id)
     if customer and customer.cnic_front_image:
         cnic_image_path = os.path.join(PROJECT_ROOT, customer.cnic_front_image)
         if os.path.exists(cnic_image_path):
@@ -188,10 +245,10 @@ def get_cnic_front_image(id):
 
 @main.route('/customers/cnic-back-image/<string:id>', methods=['GET'])
 @jwt_required()
-def get_cnic_back_image(id):
+async def get_cnic_back_image(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    customer = customer_crud.get_customer_cnic(id, company_id)
+    customer = await customer_crud.get_customer_cnic(id, company_id)
     if customer and customer.cnic_back_image:
         cnic_image_path = os.path.join(PROJECT_ROOT, customer.cnic_back_image)
         if os.path.exists(cnic_image_path):
@@ -203,10 +260,10 @@ def get_cnic_back_image(id):
 
 @main.route('/customers/agreement-document/<string:id>', methods=['GET'])
 @jwt_required()
-def get_agreement_document(id):
+async def get_agreement_document(id):
     claims = get_jwt()
     company_id = claims['company_id']
-    customer = customer_crud.get_customer_details(id, company_id)
+    customer = await customer_crud.get_customer_details(id, company_id)
     if customer and customer['agreement_document']:
         agreement_document_path = os.path.join(PROJECT_ROOT, customer['agreement_document'])
         if os.path.exists(agreement_document_path):
@@ -219,7 +276,7 @@ def get_agreement_document(id):
 
 @main.route('/customers/template', methods=['GET'])
 @jwt_required()
-def get_customer_template():
+async def get_customer_template():
     """Generate and return a CSV template for bulk customer import"""
     claims = get_jwt()
     company_id = claims['company_id']
@@ -259,7 +316,7 @@ def get_customer_template():
 
 @main.route('/customers/bulk-add', methods=['POST'])
 @jwt_required()
-def bulk_add_customers():
+async def bulk_add_customers():
     """Process a CSV/Excel file to add multiple customers"""
     claims = get_jwt()
     company_id = claims['company_id']
@@ -293,7 +350,7 @@ def bulk_add_customers():
             df = pd.read_excel(temp_file.name)
         
         # Process the data
-        results = customer_crud.bulk_add_customers(
+        results = await customer_crud.bulk_add_customers(
             df, 
             company_id, 
             user_role, 

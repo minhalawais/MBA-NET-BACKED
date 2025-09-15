@@ -13,7 +13,7 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-def get_all_customers(company_id, user_role, employee_id):
+async def get_all_customers(company_id, user_role, employee_id):
     if user_role == 'super_admin' or user_role == 'employee':
         customers = Customer.query.all()
     elif user_role == 'auditor':
@@ -22,13 +22,15 @@ def get_all_customers(company_id, user_role, employee_id):
         customers = Customer.query.filter_by(company_id=company_id).all()
     elif user_role == 'employee':
         customers = Customer.query.filter_by(company_id=company_id).all()
+
     result = []
     for customer in customers:
         area = Area.query.get(customer.area_id)
         service_plan = ServicePlan.query.get(customer.service_plan_id)
         isp = ISP.query.get(customer.isp_id)
-        #Remove: splitter = InventoryItem.query.get(customer.splitter_id)
+
         result.append({
+            # --- Old fields you already had ---
             'id': str(customer.id),
             'internet_id': customer.internet_id,
             'first_name': customer.first_name,
@@ -39,7 +41,9 @@ def get_all_customers(company_id, user_role, employee_id):
             'area': area.name if area else 'Unassigned',
             'installation_address': customer.installation_address,
             'service_plan': service_plan.name if service_plan else 'Unassigned',
+            'servicePlanPrice': float(service_plan.price) if service_plan and service_plan.price else 0,
             'isp': isp.name if isp else 'Unassigned',
+            'isp_id': str(customer.isp_id) if customer.isp_id else None,
             'connection_type': customer.connection_type,
             'internet_connection_type': customer.internet_connection_type,
             'tv_cable_connection_type': customer.tv_cable_connection_type,
@@ -49,9 +53,39 @@ def get_all_customers(company_id, user_role, employee_id):
             'cnic_front_image': customer.cnic_front_image,
             'cnic_back_image': customer.cnic_back_image,
             'gps_coordinates': customer.gps_coordinates,
-            'agreement_document': customer.agreement_document
+            'agreement_document': customer.agreement_document,
+
+            # --- Extra fields from add_customer ---
+            'company_id': str(customer.company_id),
+            'area_id': str(customer.area_id) if customer.area_id else None,
+            'service_plan_id': str(customer.service_plan_id) if customer.service_plan_id else None,
+            'wire_length': customer.wire_length,
+            'wire_ownership': customer.wire_ownership,
+            'router_ownership': customer.router_ownership,
+            'router_id': str(customer.router_id) if customer.router_id else None,
+            'router_serial_number': customer.router_serial_number,
+            'patch_cord_ownership': customer.patch_cord_ownership,
+            'patch_cord_count': customer.patch_cord_count,
+            'patch_cord_ethernet_ownership': customer.patch_cord_ethernet_ownership,
+            'patch_cord_ethernet_count': customer.patch_cord_ethernet_count,
+            'splicing_box_ownership': customer.splicing_box_ownership,
+            'splicing_box_serial_number': customer.splicing_box_serial_number,
+            'ethernet_cable_ownership': customer.ethernet_cable_ownership,
+            'ethernet_cable_length': customer.ethernet_cable_length,
+            'dish_ownership': customer.dish_ownership,
+            'dish_id': str(customer.dish_id) if customer.dish_id else None,
+            'dish_mac_address': customer.dish_mac_address,
+            'node_count': customer.node_count,
+            'stb_serial_number': customer.stb_serial_number,
+            'discount_amount': customer.discount_amount,
+            'recharge_date': customer.recharge_date.isoformat() if customer.recharge_date else None,
+            'miscellaneous_details': customer.miscellaneous_details,
+            'miscellaneous_charges': customer.miscellaneous_charges,
+            'created_at': customer.created_at.isoformat() if customer.created_at else None,
+            'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
         })
     return result
+
 
 def format_phone_number(phone):
     """Format phone number by removing all non-numeric characters."""
@@ -65,26 +99,51 @@ def format_phone_number(phone):
     # Ensure the number starts with '92'
     return f"92{cleaned}"
 
-def add_customer(data, user_role, current_user_id, ip_address, user_agent, company_id):
+def check_existing_internet_id(internet_id, company_id):
+    existing_customer = Customer.query.filter_by(
+        internet_id=internet_id,
+        company_id=company_id
+    ).first()
+    print('Checked existing internet ID:', existing_customer)
+    return existing_customer
+
+def check_existing_cnic(cnic, company_id):
+    existing_customer = Customer.query.filter_by(
+        cnic=cnic,
+        company_id=company_id
+    ).first()
+    return existing_customer
+
+async def add_customer(data, user_role, current_user_id, ip_address, user_agent, company_id):
     try:
+        # Check if internet ID already exists
+        existing_customer = check_existing_internet_id(data.get('internet_id'), company_id)
+        if existing_customer:
+            raise ValueError(f"Internet ID '{data.get('internet_id')}' is already taken")
+        
+        # Check if CNIC already exists
+        existing_cnic = check_existing_cnic(data.get('cnic'), company_id)
+        if existing_cnic:
+            raise ValueError(f"CNIC '{data.get('cnic')}' is already registered")
+        
         # Format phone numbers before saving
-        phone_1 = format_phone_number(data['phone_1'])
+        phone_1 = format_phone_number(data.get('phone_1')) if data.get('phone_1') else None
         phone_2 = format_phone_number(data.get('phone_2')) if data.get('phone_2') else None
 
         new_customer = Customer(
-            company_id=uuid.UUID(data['company_id']),
-            area_id=data['area_id'],
-            service_plan_id=data['service_plan_id'],
-            first_name=data['first_name'],
-            last_name=data['last_name'],
-            email=data['email'],
-            internet_id=data['internet_id'],
+            company_id=uuid.UUID(company_id),
+            area_id=data.get('area_id'),
+            service_plan_id=data.get('service_plan_id'),
+            first_name=data.get('first_name'),
+            last_name=data.get('last_name'),
+            email=data.get('email'),
+            internet_id=data.get('internet_id'),
             phone_1=phone_1,
             phone_2=phone_2,
-            installation_address=data['installation_address'],
-            installation_date=data['installation_date'],
-            isp_id=data['isp_id'],
-            connection_type=data['connection_type'],
+            installation_address=data.get('installation_address'),
+            installation_date=data.get('installation_date'),
+            isp_id=data.get('isp_id'),
+            connection_type=data.get('connection_type'),
             internet_connection_type=data.get('internet_connection_type'),
             wire_length=data.get('wire_length'),
             wire_ownership=data.get('wire_ownership'),
@@ -110,9 +169,9 @@ def add_customer(data, user_role, current_user_id, ip_address, user_agent, compa
             miscellaneous_details=data.get('miscellaneous_details'),
             miscellaneous_charges=data.get('miscellaneous_charges'),
             is_active=True,
-            cnic=data['cnic'],
-            cnic_front_image=data['cnic_front_image'],
-            cnic_back_image=data['cnic_back_image'],
+            cnic=data.get('cnic'),
+            cnic_front_image=data.get('cnic_front_image'),
+            cnic_back_image=data.get('cnic_back_image'),
             gps_coordinates=data.get('gps_coordinates'),
             agreement_document=data.get('agreement_document')
         )
@@ -137,17 +196,16 @@ def add_customer(data, user_role, current_user_id, ip_address, user_agent, compa
         db.session.rollback()
         raise
 
-def update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
+async def update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
     if user_role == 'super_admin' or user_role == 'employee':
         customer = Customer.query.get(id)
     elif user_role == 'auditor':
         customer = Customer.query.filter_by(id=id, is_active=True, company_id=company_id).first()
     elif user_role == 'company_owner':
         customer = Customer.query.filter_by(id=id, company_id=company_id).first()
-    
+        uuid_fields = ['area_id', 'service_plan_id', 'isp_id', 'router_id', 'dish_id']
     if not customer:
         return None
-
     old_values = {
         'email': customer.email,
         'first_name': customer.first_name,
@@ -212,7 +270,7 @@ def update_customer(id, data, company_id, user_role, current_user_id, ip_address
 
     return customer
 
-def delete_customer(id, company_id, user_role, current_user_id, ip_address, user_agent):
+async def delete_customer(id, company_id, user_role, current_user_id, ip_address, user_agent):
     if user_role == 'super_admin' or user_role == 'employee':
         customer = Customer.query.get(id)
     elif user_role == 'auditor':
@@ -250,8 +308,56 @@ def delete_customer(id, company_id, user_role, current_user_id, ip_address, user
     )
 
     return True
-
-def toggle_customer_status(id, company_id, user_role, current_user_id, ip_address, user_agent):
+async def validate_customer_data(data, is_update=False, customer_id=None):
+    errors = {}
+    
+    # Required field validation
+    required_fields = [
+        'first_name', 'last_name', 'cnic', 'phone_1', 'email', 
+        'installation_address', 'area_id', 'service_plan_id', 'isp_id',
+        'connection_type', 'installation_date'
+    ]
+    
+    if not is_update:
+        required_fields.append('internet_id')
+    
+    for field in required_fields:
+        if not data.get(field) or str(data.get(field)).strip() == '':
+            field_name = field.replace('_', ' ').title()
+            errors[field] = f"{field_name} is required"
+    
+    # Email format validation
+    if data.get('email'):
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, data['email']):
+            errors['email'] = 'Please enter a valid email address'
+    
+    # CNIC format validation (13 digits)
+    if data.get('cnic'):
+        cnic_clean = re.sub(r'\D', '', data['cnic'])
+        if len(cnic_clean) != 13:
+            errors['cnic'] = 'CNIC must be exactly 13 digits'
+        else:
+            data['cnic'] = cnic_clean  # Store clean CNIC
+    
+    # Phone number validation
+    for phone_field in ['phone_1', 'phone_2']:
+        if data.get(phone_field):
+            phone_clean = re.sub(r'\D', '', data[phone_field])
+            if phone_field == 'phone_1' and len(phone_clean) < 10:
+                errors[phone_field] = 'Phone number must be at least 10 digits'
+            elif phone_field == 'phone_2' and phone_clean and len(phone_clean) < 10:
+                errors[phone_field] = 'WhatsApp number must be at least 10 digits'
+    
+    # Internet ID validation
+    if data.get('internet_id'):
+        if len(data['internet_id']) < 3:
+            errors['internet_id'] = 'Internet ID must be at least 3 characters'
+        elif not re.match(r'^[a-zA-Z0-9_-]+$', data['internet_id']):
+            errors['internet_id'] = 'Internet ID can only contain letters, numbers, hyphens, and underscores'
+    
+    return errors
+async def toggle_customer_status(id, company_id, user_role, current_user_id, ip_address, user_agent):
     if user_role == 'super_admin' or user_role == 'employee':
         customer = Customer.query.get(id)
     elif user_role == 'auditor':
@@ -280,7 +386,7 @@ def toggle_customer_status(id, company_id, user_role, current_user_id, ip_addres
 
     return customer
 
-def get_customer_details(id, company_id):
+async def get_customer_details(id, company_id):
     try:
         # Check if customer exists
         customer = Customer.query.filter_by(id=id, company_id=company_id).first()
@@ -497,7 +603,7 @@ def get_customer_details(id, company_id):
         print(f"Error in get_customer_details: {str(e)}")
         return {'error': 'Internal server error'}, 500
 
-def get_customer_invoices(id, company_id):
+async def get_customer_invoices(id, company_id):
     invoices = Invoice.query.join(Customer).filter(
         Customer.id == id,
         Customer.company_id == company_id
@@ -512,7 +618,7 @@ def get_customer_invoices(id, company_id):
         'status': invoice.status
     } for invoice in invoices]
 
-def get_customer_payments(id, company_id):
+async def get_customer_payments(id, company_id):
     payments = Payment.query.join(Invoice).join(Customer).filter(
         Customer.id == id,
         Customer.company_id == company_id
@@ -526,7 +632,7 @@ def get_customer_payments(id, company_id):
         'status': payment.status
     } for payment in payments]
 
-def get_customer_complaints(id, company_id):
+async def get_customer_complaints(id, company_id):
     complaints = Complaint.query.join(Customer).filter(
         Customer.id == id,
         Customer.company_id == company_id
@@ -539,7 +645,7 @@ def get_customer_complaints(id, company_id):
         'created_at': complaint.created_at.isoformat()
     } for complaint in complaints]
 
-def get_customer_cnic(id, company_id):
+async def get_customer_cnic(id, company_id):
     customer = Customer.query.filter_by(id=id, company_id=company_id).first()
     if customer:
         cnic_front_image_path = str(customer.cnic_front_image)
@@ -552,7 +658,7 @@ def get_customer_cnic(id, company_id):
     return None
 
 
-def search_customer(company_id, search_term):
+async def search_customer(company_id, search_term):
     customer = Customer.query.filter(
         Customer.company_id == company_id,
         or_(
@@ -579,7 +685,7 @@ def search_customer(company_id, search_term):
     return None
 
 
-def bulk_add_customers(df, company_id, user_role, current_user_id, ip_address, user_agent):
+async def bulk_add_customers(df, company_id, user_role, current_user_id, ip_address, user_agent):
     """
     Process a dataframe of customer data and add valid customers to the database
     

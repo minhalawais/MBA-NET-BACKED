@@ -27,7 +27,14 @@ def get_all_invoices(company_id, user_role, employee_id):
             invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).filter(Invoice.company_id == company_id).all()
         elif user_role == 'employee':
             invoices = db.session.query(Invoice).options(joinedload(Invoice.customer)).filter(Invoice.generated_by == employee_id).all()
-        return [invoice_to_dict(invoice) for invoice in invoices]
+        # Include customer.internet_id in the returned data
+        return [
+            {
+                **invoice_to_dict(invoice),
+                "internet_id": invoice.customer.internet_id if invoice.customer else None
+            }
+            for invoice in invoices
+        ]
     except Exception as e:
         logger.error(f"Error listing invoices: {str(e)}")
         raise InvoiceError("Failed to list invoices")

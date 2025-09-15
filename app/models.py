@@ -87,21 +87,21 @@ class ServicePlan(db.Model):
 
 class Customer(db.Model):
     __tablename__ = 'customers'
-    id = db.Column(UUID(as_uuid=True), primary_key=True,default=uuid.uuid4)
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
     area_id = db.Column(UUID(as_uuid=True), db.ForeignKey('areas.id'), nullable=False)
     service_plan_id = db.Column(UUID(as_uuid=True), db.ForeignKey('service_plans.id'), nullable=False)
     isp_id = db.Column(UUID(as_uuid=True), db.ForeignKey('isps.id'), nullable=False)
     first_name = db.Column(db.String(50), nullable=False)
     last_name = db.Column(db.String(50), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
+    email = db.Column(db.String(120), nullable=False)
     internet_id = db.Column(db.String(50), unique=True, nullable=False)
     phone_1 = db.Column(db.String(20), nullable=False)
     phone_2 = db.Column(db.String(20))
     installation_address = db.Column(db.String(200), nullable=False)
     installation_date = db.Column(db.Date, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
-    cnic = db.Column(db.String(15), nullable=False)
+    cnic = db.Column(db.String(15), unique=True, nullable=False)
     cnic_front_image = db.Column(db.String(200))
     cnic_back_image = db.Column(db.String(200))
     created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
@@ -140,8 +140,6 @@ class Customer(db.Model):
     service_plan = relationship('ServicePlan', back_populates='customers')
     isp = relationship('ISP', back_populates='customers')
     inventory_assignments = relationship('InventoryAssignment', back_populates='customer')
-
-
 
 class Invoice(db.Model):
     __tablename__ = 'invoices'
@@ -183,10 +181,29 @@ class Payment(db.Model):
     created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
     updated_at = db.Column(db.TIMESTAMP(timezone=True), onupdate=db.func.current_timestamp())
     is_active = db.Column(db.Boolean, default=True)
+    # Add this field to the Payment model
+    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'))
 
+    # Add relationship
+    bank_account = db.relationship('BankAccount', backref=db.backref('payments', lazy=True))
     invoice = db.relationship('Invoice', backref=db.backref('payments', lazy=True))
     receiver = db.relationship('User', backref=db.backref('received_payments', lazy=True))
-
+    
+class BankAccount(db.Model):
+    __tablename__ = 'bank_accounts'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'))
+    bank_name = db.Column(db.String(100), nullable=False)
+    account_title = db.Column(db.String(100), nullable=False)
+    account_number = db.Column(db.String(50), nullable=False)
+    iban = db.Column(db.String(34))
+    branch_code = db.Column(db.String(20))
+    branch_address = db.Column(db.Text)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    company = relationship('Company', backref=db.backref('bank_accounts', lazy=True))
 class Complaint(db.Model):
     __tablename__ = 'complaints'
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

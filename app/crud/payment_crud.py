@@ -1,5 +1,5 @@
 from app import db
-from app.models import Payment, Customer, Invoice, Company
+from app.models import Payment, Customer, Invoice, Company, BankAccount
 from app.utils.logging_utils import log_action
 import uuid
 import logging
@@ -43,7 +43,13 @@ def get_all_payments(company_id, user_role,employee_id):
                     'failure_reason': payment.failure_reason,
                     'payment_proof': payment.payment_proof,
                     'received_by': f"{payment.receiver.first_name} {payment.receiver.last_name}",
-                    'is_active': payment.is_active
+                    'is_active': payment.is_active,
+                    'due_date': payment.invoice.due_date.isoformat() if payment.invoice.due_date else None,  # Add this
+                    'status': payment.invoice.status if hasattr(payment.invoice, 'status') else 'N/A',  # Add this
+                    'billing_start_date': payment.invoice.billing_start_date.isoformat() if payment.invoice.billing_start_date else None,
+                    'billing_end_date': payment.invoice.billing_end_date.isoformat() if payment.invoice.billing_end_date else None,
+                    'bank_account_id': str(payment.bank_account_id) if payment.bank_account_id else None,
+                    'bank_account_details': f"{payment.bank_account.bank_name} - {payment.bank_account.account_number}" if payment.bank_account else None,
                 })
             except AttributeError as e:
                 logger.error(f"Error processing payment {payment.id}: {str(e)}")
@@ -77,6 +83,7 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
                 status=data['status'],
                 failure_reason=data.get('failure_reason'),
                 received_by=uuid.UUID(data['received_by']),
+                bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,
                 is_active=True
             )
         except (ValueError, TypeError) as e:
@@ -118,7 +125,23 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
         logger.error(f"Error adding payment: {str(e)}")
         db.session.rollback()
         raise PaymentError("Failed to create payment")
-
+def fetch_active_bank_accounts(company_id):
+    try:
+        bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
+        return [
+            {
+                'id': str(account.id),
+                'bank_name': account.bank_name,
+                'account_title': account.account_title,
+                'account_number': account.account_number,
+                'iban': account.iban,
+                'branch_code': account.branch_code,
+                'branch_address': account.branch_address
+            }
+            for account in bank_accounts
+        ]
+    except Exception as e:
+        raise Exception(f"Database operation failed: {str(e)}")
 def update_payment(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
         if user_role == 'super_admin':
@@ -166,6 +189,9 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
             payment.received_by = uuid.UUID(data['received_by'])
         if 'is_active' in data:
             payment.is_active = data['is_active']
+        if 'bank_account_id' in data:
+            payment.bank_account_id = uuid.UUID(data['bank_account_id']) if data['bank_account_id'] else None
+        
         # Handle payment proof update
         if 'payment_proof' in data:
             try:

@@ -24,7 +24,7 @@ def login():
                 "company_id": str(user.company_id),
                 "role": user.role
             },
-            expires_delta=timedelta(hours=1)
+            expires_delta=timedelta(hours=150)
         )
         return jsonify(token=access_token, role=user.role, company_id=str(user.company_id)), 200
     else:
