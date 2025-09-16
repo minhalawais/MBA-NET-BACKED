@@ -110,28 +110,31 @@ async def add_new_customer():
     data = request.form.to_dict()
     data['company_id'] = company_id
     
+    # Validate data first
     validation_errors = await customer_crud.validate_customer_data(data, is_update=False)
-    print('Validation Errors: ',validation_errors)
+    
     if validation_errors:
         return jsonify({'errors': validation_errors}), 400
     
     try:
         # Check Internet ID uniqueness
-        if customer_crud.check_existing_internet_id(data['internet_id'], company_id):
-            validation_errors['internet_id'] = 'Internet ID already exists'
+        existing_internet_id = customer_crud.check_existing_internet_id(data['internet_id'], company_id)
+        if existing_internet_id:
+            return jsonify({'errors': {'internet_id': 'Internet ID already exists'}}), 400
         
         # Check CNIC uniqueness
-        if customer_crud.check_existing_cnic(data['cnic'], company_id):
-            validation_errors['cnic'] = 'CNIC already exists'
-        
-        if validation_errors:
-            return jsonify({'errors': validation_errors}), 400
+        existing_cnic = customer_crud.check_existing_cnic(data['cnic'], company_id)
+        if existing_cnic:
+            return jsonify({'errors': {'cnic': 'CNIC already exists'}}), 400
         
         new_customer = await customer_crud.add_customer(data, user_role, current_user_id, ip_address, user_agent, company_id)
         return jsonify({'message': 'Customer added successfully', 'id': str(new_customer.id)}), 201
         
+    except ValueError as ve:
+        return jsonify({'error': 'Validation failed', 'message': str(ve)}), 400
     except Exception as e:
-        return jsonify({'error': 'Failed to add customer', 'message': str(e)}), 400
+        logger.error(f"Error adding customer: {str(e)}")
+        return jsonify({'error': 'Failed to add customer', 'message': 'An unexpected error occurred'}), 500
 
 @main.route('/customers/update/<string:id>', methods=['PUT'])
 @jwt_required()
@@ -144,28 +147,30 @@ async def update_existing_customer(id):
     user_agent = request.headers.get('User-Agent')
     data = request.form.to_dict()
     data['company_id'] = company_id
+    
+    # Validate data first
     validation_errors = await customer_crud.validate_customer_data(data, is_update=True, customer_id=id)
+    
     if validation_errors:
-        print('Validation Errors: ',validation_errors)
         return jsonify({'errors': validation_errors}), 400
     
     try:
+        # Check CNIC uniqueness (excluding current customer)
         if data.get('cnic'):
-            existing_cnic_customer = await customer_crud.check_existing_cnic(data['cnic'], company_id)
+            existing_cnic_customer = customer_crud.check_existing_cnic(data['cnic'], company_id)
             if existing_cnic_customer and str(existing_cnic_customer.id) != id:
-                validation_errors['cnic'] = 'CNIC already exists'
-        
-        if validation_errors:
-            return jsonify({'errors': validation_errors}), 400
+                return jsonify({'errors': {'cnic': 'CNIC already exists'}}), 400
         
         updated_customer = await customer_crud.update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent)
         if updated_customer:
             return jsonify({'message': 'Customer updated successfully'}), 200
         return jsonify({'message': 'Customer not found'}), 404
         
+    except ValueError as ve:
+        return jsonify({'error': 'Validation failed', 'message': str(ve)}), 400
     except Exception as e:
-        print('Error: ',str(e))
-        return jsonify({'error': 'Failed to update customer', 'message': str(e)}), 400
+        logger.error(f"Error updating customer: {str(e)}")
+        return jsonify({'error': 'Failed to update customer', 'message': 'An unexpected error occurred'}), 500
 
 
 @main.route('/customers/delete/<string:id>', methods=['DELETE'])

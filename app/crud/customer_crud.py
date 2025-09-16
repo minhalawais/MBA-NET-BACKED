@@ -130,10 +130,30 @@ async def add_customer(data, user_role, current_user_id, ip_address, user_agent,
         phone_1 = format_phone_number(data.get('phone_1')) if data.get('phone_1') else None
         phone_2 = format_phone_number(data.get('phone_2')) if data.get('phone_2') else None
 
+        # Convert UUID strings to UUID objects
+        area_id = uuid.UUID(data.get('area_id')) if data.get('area_id') else None
+        service_plan_id = uuid.UUID(data.get('service_plan_id')) if data.get('service_plan_id') else None
+        isp_id = uuid.UUID(data.get('isp_id')) if data.get('isp_id') else None
+        router_id = uuid.UUID(data.get('router_id')) if data.get('router_id') else None
+        dish_id = uuid.UUID(data.get('dish_id')) if data.get('dish_id') else None
+
+        # Parse date strings to date objects
+        installation_date = datetime.strptime(data.get('installation_date'), '%Y-%m-%d').date() if data.get('installation_date') else None
+        recharge_date = datetime.strptime(data.get('recharge_date'), '%Y-%m-%d').date() if data.get('recharge_date') else None
+
+        # Convert numeric fields
+        wire_length = float(data.get('wire_length')) if data.get('wire_length') else None
+        patch_cord_count = int(data.get('patch_cord_count')) if data.get('patch_cord_count') else None
+        patch_cord_ethernet_count = int(data.get('patch_cord_ethernet_count')) if data.get('patch_cord_ethernet_count') else None
+        ethernet_cable_length = float(data.get('ethernet_cable_length')) if data.get('ethernet_cable_length') else None
+        node_count = int(data.get('node_count')) if data.get('node_count') else None
+        discount_amount = float(data.get('discount_amount')) if data.get('discount_amount') else None
+        miscellaneous_charges = float(data.get('miscellaneous_charges')) if data.get('miscellaneous_charges') else None
+
         new_customer = Customer(
             company_id=uuid.UUID(company_id),
-            area_id=data.get('area_id'),
-            service_plan_id=data.get('service_plan_id'),
+            area_id=area_id,
+            service_plan_id=service_plan_id,
             first_name=data.get('first_name'),
             last_name=data.get('last_name'),
             email=data.get('email'),
@@ -141,33 +161,33 @@ async def add_customer(data, user_role, current_user_id, ip_address, user_agent,
             phone_1=phone_1,
             phone_2=phone_2,
             installation_address=data.get('installation_address'),
-            installation_date=data.get('installation_date'),
-            isp_id=data.get('isp_id'),
+            installation_date=installation_date,
+            isp_id=isp_id,
             connection_type=data.get('connection_type'),
             internet_connection_type=data.get('internet_connection_type'),
-            wire_length=data.get('wire_length'),
+            wire_length=wire_length,
             wire_ownership=data.get('wire_ownership'),
             router_ownership=data.get('router_ownership'),
-            router_id=data.get('router_id'),
+            router_id=router_id,
             router_serial_number=data.get('router_serial_number'),
             patch_cord_ownership=data.get('patch_cord_ownership'),
-            patch_cord_count=data.get('patch_cord_count'),
+            patch_cord_count=patch_cord_count,
             patch_cord_ethernet_ownership=data.get('patch_cord_ethernet_ownership'),
-            patch_cord_ethernet_count=data.get('patch_cord_ethernet_count'),
+            patch_cord_ethernet_count=patch_cord_ethernet_count,
             splicing_box_ownership=data.get('splicing_box_ownership'),
             splicing_box_serial_number=data.get('splicing_box_serial_number'),
             ethernet_cable_ownership=data.get('ethernet_cable_ownership'),
-            ethernet_cable_length=data.get('ethernet_cable_length'),
+            ethernet_cable_length=ethernet_cable_length,
             dish_ownership=data.get('dish_ownership'),
-            dish_id=data.get('dish_id'),
+            dish_id=dish_id,
             dish_mac_address=data.get('dish_mac_address'),
             tv_cable_connection_type=data.get('tv_cable_connection_type'),
-            node_count=data.get('node_count'),
+            node_count=node_count,
             stb_serial_number=data.get('stb_serial_number'),
-            discount_amount=data.get('discount_amount'),
-            recharge_date=data.get('recharge_date'),
+            discount_amount=discount_amount,
+            recharge_date=recharge_date,
             miscellaneous_details=data.get('miscellaneous_details'),
-            miscellaneous_charges=data.get('miscellaneous_charges'),
+            miscellaneous_charges=miscellaneous_charges,
             is_active=True,
             cnic=data.get('cnic'),
             cnic_front_image=data.get('cnic_front_image'),
@@ -191,84 +211,148 @@ async def add_customer(data, user_role, current_user_id, ip_address, user_agent,
         )
 
         return new_customer
-    except Exception as e:
-        print('Error:', str(e))
+        
+    except ValueError as ve:
         db.session.rollback()
-        raise
+        logger.error(f"Value error in add_customer: {str(ve)}")
+        raise ValueError(f"Invalid data format: {str(ve)}")
+        
+    except IntegrityError as ie:
+        db.session.rollback()
+        logger.error(f"Integrity error in add_customer: {str(ie)}")
+        raise ValueError("Database integrity error. This may be due to duplicate or invalid data.")
+        
+    except SQLAlchemyError as sae:
+        db.session.rollback()
+        logger.error(f"Database error in add_customer: {str(sae)}")
+        raise ValueError("Database operation failed. Please try again.")
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Unexpected error in add_customer: {str(e)}")
+        raise ValueError(f"Unexpected error: {str(e)}")
 
 async def update_customer(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
-    if user_role == 'super_admin' or user_role == 'employee':
-        customer = Customer.query.get(id)
-    elif user_role == 'auditor':
-        customer = Customer.query.filter_by(id=id, is_active=True, company_id=company_id).first()
-    elif user_role == 'company_owner':
-        customer = Customer.query.filter_by(id=id, company_id=company_id).first()
-        uuid_fields = ['area_id', 'service_plan_id', 'isp_id', 'router_id', 'dish_id']
-    if not customer:
-        return None
-    old_values = {
-        'email': customer.email,
-        'first_name': customer.first_name,
-        'last_name': customer.last_name,
-        'internet_id': customer.internet_id,
-        'phone_1': customer.phone_1,
-        'phone_2': customer.phone_2,
-        'area_id': str(customer.area_id),
-        'service_plan_id': str(customer.service_plan_id),
-        'isp_id': str(customer.isp_id),
-        'installation_address': customer.installation_address,
-        'installation_date': customer.installation_date.isoformat() if customer.installation_date else None,
-        'connection_type': customer.connection_type,
-        'internet_connection_type': customer.internet_connection_type,
-        'wire_length': customer.wire_length,
-        'wire_ownership': customer.wire_ownership,
-        'router_ownership': customer.router_ownership,
-        'router_id': str(customer.router_id) if customer.router_id else None,
-        'router_serial_number': customer.router_serial_number,
-        'patch_cord_ownership': customer.patch_cord_ownership,
-        'patch_cord_count': customer.patch_cord_count,
-        'patch_cord_ethernet_ownership': customer.patch_cord_ethernet_ownership,
-        'patch_cord_ethernet_count': customer.patch_cord_ethernet_count,
-        'splicing_box_ownership': customer.splicing_box_ownership,
-        'splicing_box_serial_number': customer.splicing_box_serial_number,
-        'ethernet_cable_ownership': customer.ethernet_cable_ownership,
-        'ethernet_cable_length': customer.ethernet_cable_length,
-        'dish_ownership': customer.dish_ownership,
-        'dish_id': str(customer.dish_id) if customer.dish_id else None,
-        'dish_mac_address': customer.dish_mac_address,
-        'tv_cable_connection_type': customer.tv_cable_connection_type,
-        'node_count': customer.node_count,
-        'stb_serial_number': customer.stb_serial_number,
-        'discount_amount': float(customer.discount_amount) if customer.discount_amount else None,
-        'recharge_date': customer.recharge_date.isoformat() if customer.recharge_date else None,
-        'miscellaneous_details': customer.miscellaneous_details,
-        'miscellaneous_charges': float(customer.miscellaneous_charges) if customer.miscellaneous_charges else None,
-        'is_active': customer.is_active,
-        'cnic': customer.cnic,
-        'cnic_front_image': customer.cnic_front_image,
-        'cnic_back_image': customer.cnic_back_image,
-        'gps_coordinates': customer.gps_coordinates,
-        'agreement_document': customer.agreement_document
-    }
+    try:
+        if user_role == 'super_admin' or user_role == 'employee':
+            customer = Customer.query.get(id)
+        elif user_role == 'auditor':
+            customer = Customer.query.filter_by(id=id, is_active=True, company_id=company_id).first()
+        elif user_role == 'company_owner':
+            customer = Customer.query.filter_by(id=id, company_id=company_id).first()
+        
+        if not customer:
+            raise ValueError("Customer not found")
 
-    for key, value in data.items():
-        setattr(customer, key, value)
+        old_values = {
+            'email': customer.email,
+            'first_name': customer.first_name,
+            'last_name': customer.last_name,
+            'internet_id': customer.internet_id,
+            'phone_1': customer.phone_1,
+            'phone_2': customer.phone_2,
+            'area_id': str(customer.area_id),
+            'service_plan_id': str(customer.service_plan_id),
+            'isp_id': str(customer.isp_id),
+            'installation_address': customer.installation_address,
+            'installation_date': customer.installation_date.isoformat() if customer.installation_date else None,
+            'connection_type': customer.connection_type,
+            'internet_connection_type': customer.internet_connection_type,
+            'wire_length': customer.wire_length,
+            'wire_ownership': customer.wire_ownership,
+            'router_ownership': customer.router_ownership,
+            'router_id': str(customer.router_id) if customer.router_id else None,
+            'router_serial_number': customer.router_serial_number,
+            'patch_cord_ownership': customer.patch_cord_ownership,
+            'patch_cord_count': customer.patch_cord_count,
+            'patch_cord_ethernet_ownership': customer.patch_cord_ethernet_ownership,
+            'patch_cord_ethernet_count': customer.patch_cord_ethernet_count,
+            'splicing_box_ownership': customer.splicing_box_ownership,
+            'splicing_box_serial_number': customer.splicing_box_serial_number,
+            'ethernet_cable_ownership': customer.ethernet_cable_ownership,
+            'ethernet_cable_length': customer.ethernet_cable_length,
+            'dish_ownership': customer.dish_ownership,
+            'dish_id': str(customer.dish_id) if customer.dish_id else None,
+            'dish_mac_address': customer.dish_mac_address,
+            'tv_cable_connection_type': customer.tv_cable_connection_type,
+            'node_count': customer.node_count,
+            'stb_serial_number': customer.stb_serial_number,
+            'discount_amount': float(customer.discount_amount) if customer.discount_amount else None,
+            'recharge_date': customer.recharge_date.isoformat() if customer.recharge_date else None,
+            'miscellaneous_details': customer.miscellaneous_details,
+            'miscellaneous_charges': float(customer.miscellaneous_charges) if customer.miscellaneous_charges else None,
+            'is_active': customer.is_active,
+            'cnic': customer.cnic,
+            'cnic_front_image': customer.cnic_front_image,
+            'cnic_back_image': customer.cnic_back_image,
+            'gps_coordinates': customer.gps_coordinates,
+            'agreement_document': customer.agreement_document
+        }
 
-    db.session.commit()
+        # Process and validate data before updating
+        for key, value in data.items():
+            if value is not None and value != '':
+                # Handle special data types
+                if key in ['area_id', 'service_plan_id', 'isp_id', 'router_id', 'dish_id']:
+                    try:
+                        setattr(customer, key, uuid.UUID(value))
+                    except ValueError:
+                        raise ValueError(f"Invalid UUID format for {key}")
+                elif key in ['installation_date', 'recharge_date']:
+                    try:
+                        setattr(customer, key, datetime.strptime(value, '%Y-%m-%d').date())
+                    except ValueError:
+                        raise ValueError(f"Invalid date format for {key}. Use YYYY-MM-DD")
+                elif key in ['wire_length', 'ethernet_cable_length', 'discount_amount', 'miscellaneous_charges']:
+                    try:
+                        setattr(customer, key, float(value))
+                    except ValueError:
+                        raise ValueError(f"Invalid number format for {key}")
+                elif key in ['patch_cord_count', 'patch_cord_ethernet_count', 'node_count']:
+                    try:
+                        setattr(customer, key, int(value))
+                    except ValueError:
+                        raise ValueError(f"Invalid integer format for {key}")
+                elif key in ['phone_1', 'phone_2']:
+                    setattr(customer, key, format_phone_number(value))
+                else:
+                    setattr(customer, key, value)
 
-    log_action(
-        current_user_id,
-        'UPDATE',
-        'customers',
-        customer.id,
-        old_values,
-        data,
-        ip_address,
-        user_agent,
-        company_id
-    )
+        db.session.commit()
 
-    return customer
+        log_action(
+            current_user_id,
+            'UPDATE',
+            'customers',
+            customer.id,
+            old_values,
+            data,
+            ip_address,
+            user_agent,
+            company_id
+        )
+
+        return customer
+        
+    except ValueError as ve:
+        db.session.rollback()
+        logger.error(f"Value error in update_customer: {str(ve)}")
+        raise ValueError(f"Invalid data format: {str(ve)}")
+        
+    except IntegrityError as ie:
+        db.session.rollback()
+        logger.error(f"Integrity error in update_customer: {str(ie)}")
+        raise ValueError("Database integrity error. This may be due to duplicate or invalid data.")
+        
+    except SQLAlchemyError as sae:
+        db.session.rollback()
+        logger.error(f"Database error in update_customer: {str(sae)}")
+        raise ValueError("Database operation failed. Please try again.")
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Unexpected error in update_customer: {str(e)}")
+        raise ValueError(f"Unexpected error: {str(e)}")
 
 async def delete_customer(id, company_id, user_role, current_user_id, ip_address, user_agent):
     if user_role == 'super_admin' or user_role == 'employee':
@@ -355,6 +439,32 @@ async def validate_customer_data(data, is_update=False, customer_id=None):
             errors['internet_id'] = 'Internet ID must be at least 3 characters'
         elif not re.match(r'^[a-zA-Z0-9_-]+$', data['internet_id']):
             errors['internet_id'] = 'Internet ID can only contain letters, numbers, hyphens, and underscores'
+    
+    # Connection type specific validations
+    connection_type = data.get('connection_type')
+    if connection_type in ['internet', 'both']:
+        if not data.get('internet_connection_type'):
+            errors['internet_connection_type'] = 'Internet Connection Type is required when connection type includes internet'
+    
+    if connection_type in ['tv_cable', 'both']:
+        if not data.get('tv_cable_connection_type'):
+            errors['tv_cable_connection_type'] = 'TV Cable Connection Type is required when connection type includes TV cable'
+    
+    # Validate UUID fields exist in database
+    uuid_fields = {
+        'area_id': Area,
+        'service_plan_id': ServicePlan,
+        'isp_id': ISP
+    }
+    
+    for field, model in uuid_fields.items():
+        if data.get(field):
+            try:
+                uuid_value = uuid.UUID(str(data[field]))
+                if not db.session.query(model).filter(model.id == uuid_value).first():
+                    errors[field] = f'Selected {field.replace("_", " ")} does not exist'
+            except ValueError:
+                errors[field] = f'Invalid {field.replace("_", " ")} ID format'
     
     return errors
 async def toggle_customer_status(id, company_id, user_role, current_user_id, ip_address, user_agent):
