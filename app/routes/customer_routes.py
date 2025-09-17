@@ -1,4 +1,4 @@
-from flask import jsonify, request, send_file,current_app
+from flask import jsonify, request, send_file, current_app
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from . import main
 from ..crud import customer_crud
@@ -8,6 +8,7 @@ import tempfile
 import csv
 import io
 import uuid
+import pandas as pd
 
 UPLOAD_FOLDER = os.path.join(current_app.root_path, 'uploads/cnic_images')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
@@ -69,13 +70,22 @@ async def get_customers():
     employee_id = get_jwt_identity()
     customers = await customer_crud.get_all_customers(company_id, user_role, employee_id)
     return jsonify(customers), 200
+
 @main.route('/customers/check-internet-id/<string:internet_id>', methods=['GET'])
 @jwt_required()
 def check_internet_id_availability(internet_id):
     claims = get_jwt()
     company_id = claims['company_id']
     
+    customer_id = request.args.get('customer_id')
+    
     existing_customer = customer_crud.check_existing_internet_id(internet_id, company_id)
+    
+    if existing_customer and customer_id and str(existing_customer.id) == customer_id:
+        return jsonify({
+            'available': True,
+            'message': 'Current Internet ID'
+        }), 200
     
     return jsonify({
         'available': existing_customer is None,
@@ -88,14 +98,20 @@ def check_cnic_availability(cnic):
     claims = get_jwt()
     company_id = claims['company_id']
     
+    customer_id = request.args.get('customer_id')
+    
     existing_customer = customer_crud.check_existing_cnic(cnic, company_id)
+    
+    if existing_customer and customer_id and str(existing_customer.id) == customer_id:
+        return jsonify({
+            'available': True,
+            'message': 'Current CNIC'
+        }), 200
     
     return jsonify({
         'available': existing_customer is None,
         'message': 'CNIC is available' if existing_customer is None else 'CNIC already exists'
     }), 200
-
-
 
 @main.route('/customers/add', methods=['POST'])
 @jwt_required()
@@ -171,7 +187,6 @@ async def update_existing_customer(id):
     except Exception as e:
         logger.error(f"Error updating customer: {str(e)}")
         return jsonify({'error': 'Failed to update customer', 'message': 'An unexpected error occurred'}), 500
-
 
 @main.route('/customers/delete/<string:id>', methods=['DELETE'])
 @jwt_required()
@@ -257,7 +272,7 @@ async def get_cnic_back_image(id):
     if customer and customer.cnic_back_image:
         cnic_image_path = os.path.join(PROJECT_ROOT, customer.cnic_back_image)
         if os.path.exists(cnic_image_path):
-            print('Document : ',cnic_image_path)
+            print('Document : ', cnic_image_path)
             return send_file(cnic_image_path, mimetype='image/jpeg')
         else:
             return jsonify({'error': 'CNIC back image file not found'}), 404
@@ -272,12 +287,11 @@ async def get_agreement_document(id):
     if customer and customer['agreement_document']:
         agreement_document_path = os.path.join(PROJECT_ROOT, customer['agreement_document'])
         if os.path.exists(agreement_document_path):
-            print('Document : ',agreement_document_path)
+            print('Document : ', agreement_document_path)
             return send_file(agreement_document_path, mimetype='image/jpeg')
         else:
             return jsonify({'error': 'Agreement document file not found'}), 404
     return jsonify({'error': 'Agreement document not found'}), 404
-
 
 @main.route('/customers/template', methods=['GET'])
 @jwt_required()

@@ -117,3 +117,18 @@ def get_payment_proof_image(id):
     except Exception as error:
         return jsonify({'error': 'An error occurred while retrieving the payment proof image'}), 500
 
+
+@main.route('/payments/invoice/<string:invoice_id>', methods=['GET'])
+@jwt_required()
+def get_invoice_payment_details(invoice_id):
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    try:
+        payment = payment_crud.get_payment_by_invoice_id(invoice_id, company_id)
+        if payment:
+            return jsonify(payment), 200
+        return jsonify(None), 200
+    except Exception as e:
+        print(f"Error fetching payment for invoice {invoice_id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch payment details'}), 500

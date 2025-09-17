@@ -45,7 +45,8 @@ def invoice_to_dict(invoice):
         'invoice_number': invoice.invoice_number,
         'company_id': str(invoice.company_id),
         'customer_id': str(invoice.customer_id),
-        'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",
+        'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",\
+        'customer_phone': invoice.customer.phone_1 if invoice.customer else "",
         'billing_start_date': invoice.billing_start_date.isoformat(),
         'billing_end_date': invoice.billing_end_date.isoformat(),
         'due_date': invoice.due_date.isoformat(),
@@ -391,3 +392,47 @@ def generate_monthly_invoices(company_id, user_role, current_user_id, ip_address
         logger.error(f"Error in generate_monthly_invoices: {str(e)}")
         raise InvoiceError(f"Failed to generate monthly invoices: {str(e)}")
 
+def get_enhanced_invoice_by_id(id, company_id, user_role):
+    try:
+        if user_role == 'super_admin':
+            invoice = db.session.query(Invoice).options(
+                joinedload(Invoice.customer).joinedload(Customer.service_plan)
+            ).filter(Invoice.id == id).first()
+        elif user_role == 'auditor':
+            invoice = db.session.query(Invoice).options(
+                joinedload(Invoice.customer).joinedload(Customer.service_plan)
+            ).filter(Invoice.id == id, Invoice.is_active == True, Invoice.company_id == company_id).first()
+        elif user_role == 'company_owner':
+            invoice = db.session.query(Invoice).options(
+                joinedload(Invoice.customer).joinedload(Customer.service_plan)
+            ).filter(Invoice.id == id, Invoice.company_id == company_id).first()
+
+        if not invoice:
+            return None
+
+        # Enhanced invoice data with customer and service plan details
+        return {
+            'id': str(invoice.id),
+            'invoice_number': invoice.invoice_number,
+            'company_id': str(invoice.company_id),
+            'customer_id': str(invoice.customer_id),
+            'customer_name': f"{invoice.customer.first_name} {invoice.customer.last_name}" if invoice.customer else "N/A",
+            'customer_address': invoice.customer.installation_address if invoice.customer else "",
+            'customer_internet_id': invoice.customer.internet_id if invoice.customer else "",
+            'customer_phone': invoice.customer.phone_1 if invoice.customer else "",
+            'service_plan_name': invoice.customer.service_plan.name if invoice.customer and invoice.customer.service_plan else "N/A",
+            'billing_start_date': invoice.billing_start_date.isoformat(),
+            'billing_end_date': invoice.billing_end_date.isoformat(),
+            'due_date': invoice.due_date.isoformat(),
+            'subtotal': float(invoice.subtotal),
+            'discount_percentage': float(invoice.discount_percentage),
+            'total_amount': float(invoice.total_amount),
+            'invoice_type': invoice.invoice_type,
+            'notes': invoice.notes,
+            'generated_by': str(invoice.generated_by),
+            'status': invoice.status,
+            'is_active': invoice.is_active
+        }
+    except Exception as e:
+        logger.error(f"Error getting enhanced invoice {id}: {str(e)}")
+        raise InvoiceError("Failed to retrieve invoice details")

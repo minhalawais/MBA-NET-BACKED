@@ -312,3 +312,24 @@ def get_payment_proof(invoice_id,company_id):
     except Exception as general_error:
         logger.error(f"Unexpected error while retrieving payment proof: {str(general_error)}")
         raise PaymentError("Unable to retrieve the payment proof")
+
+def get_payment_by_invoice_id(invoice_id, company_id):
+    try:
+        payment = db.session.query(Payment).filter(
+            Payment.invoice_id == invoice_id,
+            Payment.company_id == company_id
+        ).first()
+        
+        if not payment:
+            return None
+            
+        return {
+            'id': str(payment.id),
+            'amount': float(payment.amount),
+            'payment_date': payment.payment_date.isoformat(),
+            'payment_method': payment.payment_method,
+            'transaction_id': payment.transaction_id,
+        }
+    except Exception as e:
+        logger.error(f"Error getting payment for invoice {invoice_id}: {str(e)}")
+        raise PaymentError("Failed to retrieve payment details")

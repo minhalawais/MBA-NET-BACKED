@@ -9,6 +9,7 @@ from flask import jsonify
 from sqlalchemy import or_
 import re
 import uuid
+import pandas as pd
 
 
 logger = logging.getLogger(__name__)
@@ -289,36 +290,75 @@ async def update_customer(id, data, company_id, user_role, current_user_id, ip_a
             'agreement_document': customer.agreement_document
         }
 
+        # List of fields that should NOT be updated (read-only/computed fields)
+        read_only_fields = [
+            'area', 'isp', 'service_plan', 'servicePlanPrice', 'created_at', 
+            'updated_at', 'id', 'company_id', 'company'
+        ]
+
         # Process and validate data before updating
         for key, value in data.items():
-            if value is not None and value != '':
-                # Handle special data types
-                if key in ['area_id', 'service_plan_id', 'isp_id', 'router_id', 'dish_id']:
-                    try:
+            # Skip read-only fields and empty values
+            if key in read_only_fields or value is None or value == '':
+                continue
+                
+            # Handle UUID fields
+            if key in ['area_id', 'service_plan_id', 'isp_id', 'router_id', 'dish_id']:
+                try:
+                    # Convert string to UUID object properly
+                    if isinstance(value, str):
                         setattr(customer, key, uuid.UUID(value))
-                    except ValueError:
-                        raise ValueError(f"Invalid UUID format for {key}")
-                elif key in ['installation_date', 'recharge_date']:
-                    try:
+                    else:
+                        setattr(customer, key, value)
+                except ValueError:
+                    raise ValueError(f"Invalid UUID format for {key}")
+            
+            # Handle date fields
+            elif key in ['installation_date', 'recharge_date']:
+                try:
+                    if isinstance(value, str):
                         setattr(customer, key, datetime.strptime(value, '%Y-%m-%d').date())
-                    except ValueError:
-                        raise ValueError(f"Invalid date format for {key}. Use YYYY-MM-DD")
-                elif key in ['wire_length', 'ethernet_cable_length', 'discount_amount', 'miscellaneous_charges']:
-                    try:
-                        setattr(customer, key, float(value))
-                    except ValueError:
-                        raise ValueError(f"Invalid number format for {key}")
-                elif key in ['patch_cord_count', 'patch_cord_ethernet_count', 'node_count']:
-                    try:
-                        setattr(customer, key, int(value))
-                    except ValueError:
-                        raise ValueError(f"Invalid integer format for {key}")
-                elif key in ['phone_1', 'phone_2']:
-                    setattr(customer, key, format_phone_number(value))
+                    else:
+                        setattr(customer, key, value)
+                except ValueError:
+                    raise ValueError(f"Invalid date format for {key}. Use YYYY-MM-DD")
+            
+            # Handle float fields
+            elif key in ['wire_length', 'ethernet_cable_length', 'discount_amount', 'miscellaneous_charges']:
+                try:
+                    setattr(customer, key, float(value))
+                except ValueError:
+                    raise ValueError(f"Invalid number format for {key}")
+            
+            # Handle integer fields
+            elif key in ['patch_cord_count', 'patch_cord_ethernet_count', 'node_count']:
+                try:
+                    setattr(customer, key, int(value))
+                except ValueError:
+                    raise ValueError(f"Invalid integer format for {key}")
+            
+            # Handle phone number fields
+            elif key in ['phone_1', 'phone_2']:
+                setattr(customer, key, format_phone_number(value))
+            
+            # Handle boolean fields
+            elif key == 'is_active':
+                if isinstance(value, str):
+                    setattr(customer, key, value.lower() in ['true', '1', 'yes', 'on'])
                 else:
-                    setattr(customer, key, value)
+                    setattr(customer, key, bool(value))
+            
+            # Handle all other fields
+            else:
+                setattr(customer, key, value)
 
         db.session.commit()
+
+        # Create new_values for logging (only include fields that were actually updated)
+        new_values = {}
+        for key, value in data.items():
+            if key not in read_only_fields and value is not None and value != '':
+                new_values[key] = value
 
         log_action(
             current_user_id,
@@ -326,7 +366,7 @@ async def update_customer(id, data, company_id, user_role, current_user_id, ip_a
             'customers',
             customer.id,
             old_values,
-            data,
+            new_values,
             ip_address,
             user_agent,
             company_id

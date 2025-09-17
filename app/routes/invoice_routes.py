@@ -88,10 +88,16 @@ def get_invoice(id):
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
-    invoice = invoice_crud.get_invoice_by_id(id, company_id, user_role)
-    if invoice:
-        return jsonify(invoice_crud.invoice_to_dict(invoice)), 200
-    return jsonify({'message': 'Invoice not found'}), 404
+    
+    try:
+        invoice = invoice_crud.get_enhanced_invoice_by_id(id, company_id, user_role)
+        if invoice:
+            return jsonify(invoice), 200
+        return jsonify({'message': 'Invoice not found'}), 404
+    except Exception as e:
+        logger.error(f"Error fetching invoice {id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch invoice'}), 500
+
 
 @main.route('/invoices/generate-monthly', methods=['POST'])
 @jwt_required()
