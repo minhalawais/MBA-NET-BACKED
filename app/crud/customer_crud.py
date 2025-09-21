@@ -10,6 +10,7 @@ from sqlalchemy import or_
 import re
 import uuid
 import pandas as pd
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -1054,6 +1055,481 @@ async def bulk_add_customers(df, company_id, user_role, current_user_id, ip_addr
     return {
         'success': failed_count == 0,
         'totalRecords': total_records,
+        'successCount': success_count,
+        'failedCount': failed_count,
+        'errors': errors
+    }
+
+async def get_company_areas(company_id):
+    """Get all areas for a company for dropdown population"""
+    areas = Area.query.filter_by(company_id=company_id, is_active=True).all()
+    return [{'id': str(area.id), 'name': area.name} for area in areas]
+
+async def get_company_service_plans(company_id):
+    """Get all service plans for a company for dropdown population"""
+    service_plans = ServicePlan.query.filter_by(company_id=company_id, is_active=True).all()
+    return [{'id': str(plan.id), 'name': plan.name} for plan in service_plans]
+
+async def get_company_isps(company_id):
+    """Get all ISPs for a company for dropdown population"""
+    isps = ISP.query.filter_by(company_id=company_id, is_active=True).all()
+    return [{'id': str(isp.id), 'name': isp.name} for isp in isps]
+
+
+async def validate_bulk_customers(df, company_id):
+    """
+    Validate bulk customer data without saving to database
+    Returns detailed validation results with valid and invalid rows
+    """
+    try:
+        print(f"Starting bulk customer validation for company_id: {company_id}")
+        logger.info(f"Starting bulk customer validation for company_id: {company_id}")
+        
+        # Validate input parameters
+        if df is None or df.empty:
+            error_msg = "Input DataFrame is None or empty"
+            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
+            result = {
+                'success': False,
+                'error': error_msg,
+                'totalRecords': 0,
+                'successCount': 0,
+                'failedCount': 0,
+                'validRows': [],
+                'errors': []
+            }
+            return json.dumps(result, default=str, ensure_ascii=False)
+        
+        if company_id is None:
+            error_msg = "Company ID is required"
+            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
+            result = {
+                'success': False,
+                'error': error_msg,
+                'totalRecords': len(df),
+                'successCount': 0,
+                'failedCount': len(df),
+                'validRows': [],
+                'errors': []
+            }
+            return json.dumps(result, default=str, ensure_ascii=False)
+        
+        # Initialize counters and tracking
+        total_records = len(df)
+        success_count = 0
+        failed_count = 0
+        errors = []
+        valid_rows = []
+        
+        print(f"Processing {total_records} records")
+        logger.info(f"Processing {total_records} records")
+        
+        # Required fields
+        required_fields = [
+            'internet_id', 'first_name', 'last_name', 'email', 'phone_1',
+            'area_id', 'installation_address', 'service_plan_id', 'isp_id',
+            'connection_type', 'cnic', 'installation_date'
+        ]
+        
+        print(f"Required fields: {required_fields}")
+        
+        # Check if required columns exist in DataFrame
+        missing_columns = [field for field in required_fields if field not in df.columns]
+        if missing_columns:
+            error_msg = f"Missing required columns in CSV: {missing_columns}"
+            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
+            result = {
+                'success': False,
+                'error': error_msg,
+                'totalRecords': total_records,
+                'successCount': 0,
+                'failedCount': total_records,
+                'validRows': [],
+                'errors': [{'row': 'all', 'errors': [error_msg], 'data': {}}]
+            }
+            return json.dumps(result, default=str, ensure_ascii=False)
+        
+        # Validate each row
+        for index, row in df.iterrows():
+            try:
+                print(f"Validating row {index + 1}/{total_records}")
+                
+                row_errors = []
+                row_data = row.to_dict()
+                
+                # Convert NaN values to None in row_data
+                for key, value in row_data.items():
+                    if pd.isna(value):
+                        row_data[key] = None
+                
+                # Check for missing required fields
+                for field in required_fields:
+                    try:
+                        if field not in row or pd.isna(row[field]) or str(row[field]).strip() == '':
+                            error_msg = f"Missing required field: {field}"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                    except Exception as e:
+                        error_msg = f"Error checking field {field}: {str(e)}"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg}")
+                        logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                # If there are missing fields, skip detailed validation
+                if row_errors:
+                    errors.append({"row": index, "errors": row_errors, "data": row_data})
+                    failed_count += 1
+                    print(f"  Row {index}: Failed validation due to missing fields")
+                    continue
+                
+                # Detailed field validation
+                try:
+                    # Email format validation
+                    email = str(row['email']).strip()
+                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    if not re.match(email_pattern, email):
+                        error_msg = "Invalid email format"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg} - {email}")
+                except Exception as e:
+                    error_msg = f"Error validating email: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Phone number validation
+                    phone_1 = str(row['phone_1']).strip()
+                    phone_1 = ''.join(filter(str.isdigit, phone_1))
+                    if not phone_1.startswith('92'):
+                        phone_1 = '92' + phone_1
+                    if len(phone_1) < 10 or len(phone_1) > 13:
+                        error_msg = "Invalid phone number format for phone_1"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg} - {phone_1}")
+                except Exception as e:
+                    error_msg = f"Error validating phone_1: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Phone_2 validation if provided
+                    if 'phone_2' in row and not pd.isna(row['phone_2']) and str(row['phone_2']).strip() != '':
+                        phone_2 = str(row['phone_2']).strip()
+                        phone_2 = ''.join(filter(str.isdigit, phone_2))
+                        if not phone_2.startswith('92'):
+                            phone_2 = '92' + phone_2
+                        if len(phone_2) < 10 or len(phone_2) > 13:
+                            error_msg = "Invalid phone number format for phone_2"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg} - {phone_2}")
+                except Exception as e:
+                    error_msg = f"Error validating phone_2: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # CNIC validation
+                    cnic = str(row['cnic']).strip()
+                    cnic = ''.join(filter(str.isdigit, cnic))
+                    if len(cnic) != 13:
+                        error_msg = "CNIC must be exactly 13 digits"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg} - {cnic} (length: {len(cnic)})")
+                except Exception as e:
+                    error_msg = f"Error validating CNIC: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Connection type validation
+                    connection_type = str(row['connection_type']).strip().lower()
+                    valid_connection_types = ['internet', 'tv_cable', 'both']
+                    if connection_type not in valid_connection_types:
+                        error_msg = f"connection_type must be one of: {valid_connection_types}"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg} - got '{connection_type}'")
+                except Exception as e:
+                    error_msg = f"Error validating connection_type: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Conditional validation for connection types
+                    if connection_type in ['internet', 'both']:
+                        if 'internet_connection_type' not in row or pd.isna(row['internet_connection_type']) or str(row['internet_connection_type']).strip() == '':
+                            error_msg = "internet_connection_type is required when connection_type is internet or both"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                        else:
+                            internet_connection_type = str(row['internet_connection_type']).strip().lower()
+                            valid_internet_types = ['wire', 'wireless']
+                            if internet_connection_type not in valid_internet_types:
+                                error_msg = f"internet_connection_type must be one of: {valid_internet_types}"
+                                row_errors.append(error_msg)
+                                print(f"  Row {index}: {error_msg} - got '{internet_connection_type}'")
+                except Exception as e:
+                    error_msg = f"Error validating internet_connection_type: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    if connection_type in ['tv_cable', 'both']:
+                        if 'tv_cable_connection_type' not in row or pd.isna(row['tv_cable_connection_type']) or str(row['tv_cable_connection_type']).strip() == '':
+                            error_msg = "tv_cable_connection_type is required when connection_type is tv_cable or both"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                        else:
+                            tv_cable_connection_type = str(row['tv_cable_connection_type']).strip().lower()
+                            valid_tv_types = ['analog', 'digital']
+                            if tv_cable_connection_type not in valid_tv_types:
+                                error_msg = f"tv_cable_connection_type must be one of: {valid_tv_types}"
+                                row_errors.append(error_msg)
+                                print(f"  Row {index}: {error_msg} - got '{tv_cable_connection_type}'")
+                except Exception as e:
+                    error_msg = f"Error validating tv_cable_connection_type: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Date validation
+                    installation_date = row['installation_date']
+                    if isinstance(installation_date, str):
+                        installation_date = datetime.strptime(installation_date, '%Y-%m-%d').date()
+                    elif isinstance(installation_date, pd.Timestamp):
+                        installation_date = installation_date.date()
+                    else:
+                        error_msg = "Invalid installation_date format. Use YYYY-MM-DD"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg} - got type {type(installation_date)}")
+                except (ValueError, TypeError) as e:
+                    error_msg = f"Invalid installation_date format. Use YYYY-MM-DD - {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                except Exception as e:
+                    error_msg = f"Error validating installation_date: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # UUID validation and database checks
+                    area_id = uuid.UUID(str(row['area_id']).strip())
+                    service_plan_id = uuid.UUID(str(row['service_plan_id']).strip())
+                    isp_id = uuid.UUID(str(row['isp_id']).strip())
+                    
+                    print(f"  Row {index}: UUIDs validated - Area: {area_id}, ServicePlan: {service_plan_id}, ISP: {isp_id}")
+                    
+                    # Database existence checks (with error handling for DB operations)
+                    try:
+                        area = Area.query.get(area_id)
+                        if not area:
+                            error_msg = f"Area with ID {area_id} does not exist"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                    except Exception as e:
+                        error_msg = f"Error checking Area existence: {str(e)}"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg}")
+                        logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                    
+                    try:
+                        service_plan = ServicePlan.query.get(service_plan_id)
+                        if not service_plan:
+                            error_msg = f"Service Plan with ID {service_plan_id} does not exist"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                    except Exception as e:
+                        error_msg = f"Error checking ServicePlan existence: {str(e)}"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg}")
+                        logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                    
+                    try:
+                        isp = ISP.query.get(isp_id)
+                        if not isp:
+                            error_msg = f"ISP with ID {isp_id} does not exist"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                    except Exception as e:
+                        error_msg = f"Error checking ISP existence: {str(e)}"
+                        row_errors.append(error_msg)
+                        print(f"  Row {index}: {error_msg}")
+                        logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                        
+                except ValueError as e:
+                    error_msg = f"Invalid UUID format for area_id, service_plan_id, or isp_id: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                except Exception as e:
+                    error_msg = f"Error validating UUIDs: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                try:
+                    # Check for duplicates
+                    existing_customer = Customer.query.filter(
+                        (Customer.internet_id == str(row['internet_id']).strip()) | 
+                        (Customer.email == email)
+                    ).first()
+                    
+                    if existing_customer:
+                        if existing_customer.internet_id == str(row['internet_id']).strip():
+                            error_msg = f"Customer with internet_id {row['internet_id']} already exists"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                        if existing_customer.email == email:
+                            error_msg = f"Customer with email {email} already exists"
+                            row_errors.append(error_msg)
+                            print(f"  Row {index}: {error_msg}")
+                except Exception as e:
+                    error_msg = f"Error checking for duplicate customers: {str(e)}"
+                    row_errors.append(error_msg)
+                    print(f"  Row {index}: {error_msg}")
+                    logger.error(f"Row {index}: {error_msg}", exc_info=True)
+                
+                # Categorize row
+                if row_errors:
+                    errors.append({"row": index, "errors": row_errors, "data": row_data})
+                    failed_count += 1
+                    print(f"  Row {index}: FAILED with {len(row_errors)} errors")
+                else:
+                    valid_rows.append(row_data)
+                    success_count += 1
+                    print(f"  Row {index}: PASSED validation")
+                    
+            except Exception as e:
+                # Catch any unexpected errors for individual row processing
+                error_msg = f"Unexpected error processing row {index}: {str(e)}"
+                print(f"ERROR: {error_msg}")
+                logger.error(error_msg, exc_info=True)
+                
+                errors.append({
+                    "row": index, 
+                    "errors": [error_msg], 
+                    "data": row.to_dict() if hasattr(row, 'to_dict') else {}
+                })
+                failed_count += 1
+        
+        # Final summary
+        print(f"\nValidation Summary:")
+        print(f"Total Records: {total_records}")
+        print(f"Success Count: {success_count}")
+        print(f"Failed Count: {failed_count}")
+        print(f"Success Rate: {(success_count/total_records)*100:.2f}%" if total_records > 0 else "N/A")
+        
+        logger.info(f"Validation completed - Total: {total_records}, Success: {success_count}, Failed: {failed_count}")
+        
+        if errors:
+            print(f"\nFirst 5 errors:")
+            for i, error in enumerate(errors[:5]):
+                print(f"  Row {error['row']}: {error['errors']}")
+        
+        result = {
+            'success': failed_count == 0,
+            'totalRecords': total_records,
+            'successCount': success_count,
+            'failedCount': failed_count,
+            'validRows': valid_rows,
+            'errors': errors
+        }
+        
+        # Return as JSON string
+        return json.dumps(result, default=str, ensure_ascii=False)
+        
+    except Exception as e:
+        # Catch any unexpected errors at the function level
+        error_msg = f"Critical error in validate_bulk_customers: {str(e)}"
+        print(f"CRITICAL ERROR: {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        print(f"Traceback: {traceback.format_exc()}")
+        
+        result = {
+            'success': False,
+            'error': error_msg,
+            'totalRecords': len(df) if df is not None else 0,
+            'successCount': 0,
+            'failedCount': len(df) if df is not None else 0,
+            'validRows': [],
+            'errors': [{'row': 'function', 'errors': [error_msg], 'data': {}}]
+        }
+        
+        # Return as JSON string
+        return json.dumps(result, default=str, ensure_ascii=False)
+
+async def process_validated_customers(validated_data, company_id, user_role, current_user_id, ip_address, user_agent):
+    """
+    Process pre-validated customer data and save to database
+    """
+    success_count = 0
+    failed_count = 0
+    errors = []
+    
+    for index, customer_data in enumerate(validated_data):
+        try:
+            # Format the data properly
+            formatted_data = {
+                'company_id': company_id,
+                'area_id': str(customer_data['area_id']),
+                'service_plan_id': str(customer_data['service_plan_id']),
+                'isp_id': str(customer_data['isp_id']),
+                'first_name': str(customer_data['first_name']).strip(),
+                'last_name': str(customer_data['last_name']).strip(),
+                'email': str(customer_data['email']).strip(),
+                'internet_id': str(customer_data['internet_id']).strip(),
+                'phone_1': format_phone_number(customer_data['phone_1']),
+                'phone_2': format_phone_number(customer_data.get('phone_2')) if customer_data.get('phone_2') else None,
+                'installation_address': str(customer_data['installation_address']).strip(),
+                'installation_date': customer_data['installation_date'],
+                'connection_type': str(customer_data['connection_type']).strip().lower(),
+                'cnic': ''.join(filter(str.isdigit, str(customer_data['cnic']))),
+                'is_active': True
+            }
+            
+            # Add optional fields
+            if customer_data.get('internet_connection_type'):
+                formatted_data['internet_connection_type'] = str(customer_data['internet_connection_type']).strip().lower()
+            
+            if customer_data.get('tv_cable_connection_type'):
+                formatted_data['tv_cable_connection_type'] = str(customer_data['tv_cable_connection_type']).strip().lower()
+            
+            if customer_data.get('gps_coordinates'):
+                formatted_data['gps_coordinates'] = str(customer_data['gps_coordinates']).strip()
+            
+            # Create the customer
+            new_customer = await add_customer(formatted_data, user_role, current_user_id, ip_address, user_agent, company_id)
+            success_count += 1
+            
+        except Exception as e:
+            errors.append({"row": index, "errors": [f"Error creating customer: {str(e)}"]})
+            failed_count += 1
+    
+    # Commit all successful additions
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return {
+            'success': False,
+            'totalRecords': len(validated_data),
+            'successCount': 0,
+            'failedCount': len(validated_data),
+            'errors': [{"row": 0, "errors": [f"Database error: {str(e)}"]}]
+        }
+    
+    return {
+        'success': failed_count == 0,
+        'totalRecords': len(validated_data),
         'successCount': success_count,
         'failedCount': failed_count,
         'errors': errors

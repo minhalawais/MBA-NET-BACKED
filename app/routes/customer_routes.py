@@ -9,6 +9,11 @@ import csv
 import io
 import uuid
 import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.comments import Comment
+import json
 
 UPLOAD_FOLDER = os.path.join(current_app.root_path, 'uploads/cnic_images')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
@@ -296,47 +301,311 @@ async def get_agreement_document(id):
 @main.route('/customers/template', methods=['GET'])
 @jwt_required()
 async def get_customer_template():
-    """Generate and return a CSV template for bulk customer import"""
+    """Generate and return an Excel template with dropdowns and validation for bulk customer import"""
     claims = get_jwt()
     company_id = claims['company_id']
     
-    # Create a buffer for the CSV file
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
+    # Create a new workbook and worksheet
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Customer Import Template"
     
-    # Write header row with all required fields
-    writer.writerow([
-        'internet_id', 'first_name', 'last_name', 'email', 'phone_1', 'phone_2',
-        'area_id', 'installation_address', 'service_plan_id', 'isp_id',
-        'connection_type', 'internet_connection_type', 'tv_cable_connection_type',
-        'installation_date', 'cnic', 'gps_coordinates'
-    ])
+    # Define styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    required_fill = PatternFill(start_color="FFE6E6", end_color="FFE6E6", fill_type="solid")
+    optional_fill = PatternFill(start_color="E6F3FF", end_color="E6F3FF", fill_type="solid")
+    border = Border(left=Side(style='thin'), right=Side(style='thin'), 
+                   top=Side(style='thin'), bottom=Side(style='thin'))
     
-    # Write an example row
-    writer.writerow([
+    # Define headers with validation info
+    headers = [
+        {'name': 'internet_id', 'required': True, 'comment': 'Unique Internet ID (e.g., NET12345)'},
+        {'name': 'first_name', 'required': True, 'comment': 'Customer first name'},
+        {'name': 'last_name', 'required': True, 'comment': 'Customer last name'},
+        {'name': 'email', 'required': True, 'comment': 'Valid email address'},
+        {'name': 'phone_1', 'required': True, 'comment': 'Primary phone number (with country code)'},
+        {'name': 'phone_2', 'required': False, 'comment': 'Secondary phone number (optional)'},
+        {'name': 'area_id', 'required': True, 'comment': 'Select from dropdown list'},
+        {'name': 'installation_address', 'required': True, 'comment': 'Complete installation address'},
+        {'name': 'service_plan_id', 'required': True, 'comment': 'Select from dropdown list'},
+        {'name': 'isp_id', 'required': True, 'comment': 'Select from dropdown list'},
+        {'name': 'connection_type', 'required': True, 'comment': 'internet, tv_cable, or both'},
+        {'name': 'internet_connection_type', 'required': False, 'comment': 'wire or wireless (required if connection_type is internet/both)'},
+        {'name': 'tv_cable_connection_type', 'required': False, 'comment': 'analog or digital (required if connection_type is tv_cable/both)'},
+        {'name': 'installation_date', 'required': True, 'comment': 'Format: YYYY-MM-DD'},
+        {'name': 'cnic', 'required': True, 'comment': '13-digit CNIC number'},
+        {'name': 'gps_coordinates', 'required': False, 'comment': 'Format: latitude,longitude (e.g., 31.5204,74.3587)'}
+    ]
+    
+    # Set column widths and create headers
+    for col_idx, header in enumerate(headers, 1):
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = 20
+        
+        # Set header cell
+        cell = ws.cell(row=1, column=col_idx, value=header['name'])
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+        
+        # Add comment with instructions
+        cell.comment = Comment(header['comment'], "System")
+        
+        # Color code required vs optional fields in row 2
+        info_cell = ws.cell(row=2, column=col_idx, 
+                           value="REQUIRED" if header['required'] else "OPTIONAL")
+        info_cell.fill = required_fill if header['required'] else optional_fill
+        info_cell.font = Font(bold=True, size=8)
+        info_cell.alignment = Alignment(horizontal='center')
+        info_cell.border = border
+    
+    # Fetch dropdown data from database
+    try:
+        # Get areas, service plans, and ISPs for dropdowns
+        areas = await customer_crud.get_company_areas(company_id)
+        service_plans = await customer_crud.get_company_service_plans(company_id)
+        isps = await customer_crud.get_company_isps(company_id)
+        
+        # Create hidden sheets for dropdown data
+        area_sheet = wb.create_sheet("Areas")
+        plan_sheet = wb.create_sheet("ServicePlans")
+        isp_sheet = wb.create_sheet("ISPs")
+        
+        # Populate area data
+        area_sheet.cell(row=1, column=1, value="ID")
+        area_sheet.cell(row=1, column=2, value="Name")
+        for idx, area in enumerate(areas, 2):
+            area_sheet.cell(row=idx, column=1, value=str(area['id']))
+            area_sheet.cell(row=idx, column=2, value=area['name'])
+        
+        # Populate service plan data
+        plan_sheet.cell(row=1, column=1, value="ID")
+        plan_sheet.cell(row=1, column=2, value="Name")
+        for idx, plan in enumerate(service_plans, 2):
+            plan_sheet.cell(row=idx, column=1, value=str(plan['id']))
+            plan_sheet.cell(row=idx, column=2, value=plan['name'])
+        
+        # Populate ISP data
+        isp_sheet.cell(row=1, column=1, value="ID")
+        isp_sheet.cell(row=1, column=2, value="Name")
+        for idx, isp in enumerate(isps, 2):
+            isp_sheet.cell(row=idx, column=1, value=str(isp['id']))
+            isp_sheet.cell(row=idx, column=2, value=isp['name'])
+        
+        # Hide the data sheets
+        area_sheet.sheet_state = 'hidden'
+        plan_sheet.sheet_state = 'hidden'
+        isp_sheet.sheet_state = 'hidden'
+        
+        # Add data validation for dropdowns
+        # Area dropdown (column 7)
+        area_validation = DataValidation(
+            type="list",
+            formula1=f"Areas!$A$2:$A${len(areas)+1}",
+            showDropDown=True
+        )
+        area_validation.error = "Please select a valid area from the dropdown"
+        area_validation.errorTitle = "Invalid Area"
+        ws.add_data_validation(area_validation)
+        area_validation.add(f"G3:G1000")  # Apply to area_id column
+        
+        # Service Plan dropdown (column 9)
+        plan_validation = DataValidation(
+            type="list",
+            formula1=f"ServicePlans!$A$2:$A${len(service_plans)+1}",
+            showDropDown=True
+        )
+        plan_validation.error = "Please select a valid service plan from the dropdown"
+        plan_validation.errorTitle = "Invalid Service Plan"
+        ws.add_data_validation(plan_validation)
+        plan_validation.add(f"I3:I1000")  # Apply to service_plan_id column
+        
+        # ISP dropdown (column 10)
+        isp_validation = DataValidation(
+            type="list",
+            formula1=f"ISPs!$A$2:$A${len(isps)+1}",
+            showDropDown=True
+        )
+        isp_validation.error = "Please select a valid ISP from the dropdown"
+        isp_validation.errorTitle = "Invalid ISP"
+        ws.add_data_validation(isp_validation)
+        isp_validation.add(f"J3:J1000")  # Apply to isp_id column
+        
+    except Exception as e:
+        print(f"Error fetching dropdown data: {e}")
+    
+    # Add validation for other fields
+    # Connection type validation
+    connection_validation = DataValidation(
+        type="list",
+        formula1='"internet,tv_cable,both"',
+        showDropDown=True
+    )
+    connection_validation.error = "Please select: internet, tv_cable, or both"
+    connection_validation.errorTitle = "Invalid Connection Type"
+    ws.add_data_validation(connection_validation)
+    connection_validation.add("K3:K1000")  # Apply to connection_type column
+    
+    # Internet connection type validation
+    internet_conn_validation = DataValidation(
+        type="list",
+        formula1='"wire,wireless"',
+        showDropDown=True
+    )
+    internet_conn_validation.error = "Please select: wire or wireless"
+    internet_conn_validation.errorTitle = "Invalid Internet Connection Type"
+    ws.add_data_validation(internet_conn_validation)
+    internet_conn_validation.add("L3:L1000")  # Apply to internet_connection_type column
+    
+    # TV cable connection type validation
+    tv_conn_validation = DataValidation(
+        type="list",
+        formula1='"analog,digital"',
+        showDropDown=True
+    )
+    tv_conn_validation.error = "Please select: analog or digital"
+    tv_conn_validation.errorTitle = "Invalid TV Cable Connection Type"
+    ws.add_data_validation(tv_conn_validation)
+    tv_conn_validation.add("M3:M1000")  # Apply to tv_cable_connection_type column
+    
+    # Email validation
+    email_validation = DataValidation(
+        type="custom",
+        formula1='ISERROR(FIND("@",E3))=FALSE',
+        showDropDown=False
+    )
+    email_validation.error = "Please enter a valid email address"
+    email_validation.errorTitle = "Invalid Email"
+    ws.add_data_validation(email_validation)
+    email_validation.add("E3:E1000")  # Apply to email column
+    
+    # CNIC validation (13 digits)
+    cnic_validation = DataValidation(
+        type="textLength",
+        operator="equal",
+        formula1="13",
+        showDropDown=False
+    )
+    cnic_validation.error = "CNIC must be exactly 13 digits"
+    cnic_validation.errorTitle = "Invalid CNIC"
+    ws.add_data_validation(cnic_validation)
+    cnic_validation.add("O3:O1000")  # Apply to cnic column
+    
+    # Add example row
+    example_row = [
         'NET12345', 'John', 'Doe', 'john.doe@example.com', '923001234567', '923007654321',
         'area-uuid-here', '123 Main St, City', 'service-plan-uuid-here', 'isp-uuid-here',
         'internet', 'wire', '', '2023-05-01', '1234512345671', '31.5204,74.3587'
-    ])
+    ]
     
-    # Get the CSV content
-    buffer.seek(0)
-    csv_content = buffer.getvalue()
-    buffer.close()
+    for col_idx, value in enumerate(example_row, 1):
+        cell = ws.cell(row=3, column=col_idx, value=value)
+        cell.border = border
+        cell.fill = PatternFill(start_color="F0F8FF", end_color="F0F8FF", fill_type="solid")
     
-    # Create a response with the CSV file
-    response = current_app.response_class(
-        csv_content,
-        mimetype='text/csv',
-        headers={'Content-Disposition': 'attachment; filename=customer_template.csv'}
+    # Add instructions sheet
+    instructions_sheet = wb.create_sheet("Instructions", 0)
+    instructions = [
+        "CUSTOMER BULK IMPORT INSTRUCTIONS",
+        "",
+        "1. REQUIRED FIELDS (marked in red):",
+        "   - All required fields must be filled",
+        "   - Use the dropdown lists for area_id, service_plan_id, and isp_id",
+        "",
+        "2. FIELD FORMATS:",
+        "   - internet_id: Unique identifier (e.g., NET12345)",
+        "   - email: Valid email format (user@domain.com)",
+        "   - phone_1/phone_2: Include country code (92XXXXXXXXX)",
+        "   - installation_date: YYYY-MM-DD format",
+        "   - cnic: Exactly 13 digits",
+        "   - connection_type: Choose from internet, tv_cable, or both",
+        "",
+        "3. CONDITIONAL REQUIREMENTS:",
+        "   - If connection_type is 'internet' or 'both', internet_connection_type is required",
+        "   - If connection_type is 'tv_cable' or 'both', tv_cable_connection_type is required",
+        "",
+        "4. VALIDATION:",
+        "   - The system will validate all data before import",
+        "   - Errors will be shown with specific row and field information",
+        "   - You can edit invalid rows directly in the validation interface",
+        "",
+        "5. TIPS:",
+        "   - Use the example row as a reference",
+        "   - Copy UUIDs from the dropdown sheets for area_id, service_plan_id, and isp_id",
+        "   - Save the file before uploading"
+    ]
+    
+    for idx, instruction in enumerate(instructions, 1):
+        cell = instructions_sheet.cell(row=idx, column=1, value=instruction)
+        if idx == 1:
+            cell.font = Font(bold=True, size=16)
+        elif instruction.endswith(":"):
+            cell.font = Font(bold=True)
+        instructions_sheet.column_dimensions['A'].width = 80
+    
+    # Save to temporary file
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+    wb.save(temp_file.name)
+    temp_file.close()
+    
+    # Return the file
+    return send_file(
+        temp_file.name,
+        as_attachment=True,
+        download_name='customer_import_template.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
+
+@main.route('/customers/validate-bulk', methods=['POST'])
+@jwt_required()
+async def validate_bulk_customers():
+    """Validate bulk customer data without saving to database"""
+    claims = get_jwt()
+    company_id = claims['company_id']
     
-    return response
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # Check file extension
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in ['.csv', '.xls', '.xlsx']:
+        return jsonify({'error': 'Invalid file format. Please upload a CSV or Excel file'}), 400
+    
+    # Save the file temporarily
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    file.save(temp_file.name)
+    temp_file.close()
+    
+    try:
+        # Read the file based on its extension
+        if file_ext == '.csv':
+            df = pd.read_csv(temp_file.name)
+        else:  # Excel file
+            df = pd.read_excel(temp_file.name)
+        print('Dataframe: ',df)
+        # Validate the data without saving
+        validation_results = await customer_crud.validate_bulk_customers(df, company_id)
+        
+        return jsonify(validation_results), 200
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
 
 @main.route('/customers/bulk-add', methods=['POST'])
 @jwt_required()
 async def bulk_add_customers():
-    """Process a CSV/Excel file to add multiple customers"""
+    """Process validated customer data and save to database"""
     claims = get_jwt()
     company_id = claims['company_id']
     user_role = claims['role']
@@ -344,6 +613,20 @@ async def bulk_add_customers():
     ip_address = request.remote_addr
     user_agent = request.headers.get('User-Agent')
     
+    if 'validatedData' in request.json:
+        # Process pre-validated data
+        validated_data = request.json['validatedData']
+        results = await customer_crud.process_validated_customers(
+            validated_data, 
+            company_id, 
+            user_role, 
+            current_user_id, 
+            ip_address, 
+            user_agent
+        )
+        return jsonify(results), 200
+    
+    # Original file upload logic
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
     

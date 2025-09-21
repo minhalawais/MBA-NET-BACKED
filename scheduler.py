@@ -6,6 +6,7 @@ from app import db
 from app.models import Customer, Invoice, ServicePlan
 from app.crud.invoice_crud import generate_invoice_number, add_invoice
 import uuid
+from app.utils.backup_utils import create_database_backup  # Add this import
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,6 +127,21 @@ def _process_invoices():
     except Exception as e:
         logger.error(f"Error in invoice generation process: {str(e)}")
 
+def create_daily_backup(app=None):
+    """
+    Create daily database backup
+    """
+    logger.info(f"Running daily database backup: {datetime.now()}")
+    
+    if app:
+        with app.app_context():
+            backup_path = create_database_backup(app)
+            if backup_path:
+                logger.info(f"Daily backup completed: {backup_path}")
+            else:
+                logger.error("Daily backup failed")
+    else:
+        logger.error("No Flask app provided to create_daily_backup")
 def init_scheduler(app):
     """
     Initialize the background scheduler with the Flask app context.
@@ -150,6 +166,15 @@ def init_scheduler(app):
         replace_existing=True
     )
     
+    # Add daily backup job at 1:30 AM (30 minutes after invoice generation)
+    scheduler.add_job(
+        func=create_daily_backup,
+        args=[app],
+        trigger=CronTrigger(hour=16, minute=00),
+        id='daily_backup_job',
+        name='Create daily database backup',
+        replace_existing=True
+    )
     # Start the scheduler
     scheduler.start()
     
@@ -158,3 +183,5 @@ def init_scheduler(app):
     def shutdown_scheduler(exception=None):
         if scheduler and scheduler.running:
             scheduler.shutdown(wait=False)  # Do not wait for jobs to complete
+
+
