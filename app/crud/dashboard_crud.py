@@ -1,5 +1,5 @@
 from app import db
-from app.models import Customer, Invoice, Payment, Complaint, InventoryItem, User, ServicePlan, Area, Task, Supplier, InventoryAssignment, InventoryTransaction
+from app.models import Customer, Invoice, Payment, Complaint, InventoryItem, User, BankAccount, ServicePlan, Area, Task, Supplier, InventoryAssignment, InventoryTransaction
 from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -691,3 +691,248 @@ def get_recovery_collections_data(company_id):
         print(f"Error fetching recovery and collections data: {str(e)}")
         return {'error': 'An error occurred while fetching recovery and collections data.'}
 
+
+def get_bank_account_analytics_data(company_id, filters=None):
+    try:
+        if filters is None:
+            filters = {}
+        
+        # Base query
+        query = db.session.query(
+            Payment,
+            BankAccount,
+            Invoice,
+            Customer
+        ).join(BankAccount, Payment.bank_account_id == BankAccount.id
+        ).join(Invoice, Payment.invoice_id == Invoice.id
+        ).join(Customer, Invoice.customer_id == Customer.id
+        ).filter(Payment.company_id == company_id)
+        
+        # Apply filters
+        if filters.get('start_date'):
+            query = query.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            query = query.filter(Payment.payment_date <= filters['end_date'])
+        if filters.get('bank_account_id') and filters['bank_account_id'] != 'all':
+            query = query.filter(Payment.bank_account_id == uuid.UUID(filters['bank_account_id']))
+        if filters.get('payment_method') and filters['payment_method'] != 'all':
+            query = query.filter(Payment.payment_method == filters['payment_method'])
+        
+        payments_data = query.all()
+        
+        if not payments_data:
+            return {
+                'total_payments': 0,
+                'payment_trends': [],
+                'account_performance': [],
+                'payment_method_distribution': [],
+                'top_customers': [],
+                'cash_flow_trends': [],
+                'collection_metrics': [],
+                'transaction_metrics': []
+            }
+        
+        # Get all bank accounts for the company
+        bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
+        
+        # 1. Total Payments Received (per bank account, per month, per year)
+        monthly_payments = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.date_trunc('month', Payment.payment_date).label('month'),
+            func.sum(Payment.amount).label('total_amount')
+        ).join(Payment
+        ).filter(Payment.company_id == company_id)
+        
+        if filters.get('start_date'):
+            monthly_payments = monthly_payments.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            monthly_payments = monthly_payments.filter(Payment.payment_date <= filters['end_date'])
+        
+        monthly_payments = monthly_payments.group_by(
+            BankAccount.bank_name, BankAccount.account_number, 'month'
+        ).order_by('month').all()
+        
+        payment_trends = []
+        for bank_name, account_number, month, amount in monthly_payments:
+            payment_trends.append({
+                'bank_account': f"{bank_name} - {account_number}",
+                'month': month.strftime('%Y-%m'),
+                'amount': float(amount or 0)
+            })
+        
+        # 2. Outstanding Invoices vs Collected Payments
+        outstanding_vs_collected = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.sum(case((Invoice.status == 'paid', Invoice.total_amount), else_=0)).label('collected'),
+            func.sum(case((Invoice.status != 'paid', Invoice.total_amount), else_=0)).label('outstanding')
+        ).join(Payment, BankAccount.id == Payment.bank_account_id, isouter=True
+        ).join(Invoice, Payment.invoice_id == Invoice.id, isouter=True
+        ).filter(BankAccount.company_id == company_id
+        ).group_by(BankAccount.bank_name, BankAccount.account_number).all()
+        
+        account_performance = []
+        for bank_name, account_number, collected, outstanding in outstanding_vs_collected:
+            account_performance.append({
+                'bank_account': f"{bank_name} - {account_number}",
+                'collected': float(collected or 0),
+                'outstanding': float(outstanding or 0)
+            })
+        
+        # 3. Top Paying Customers per bank account
+        top_customers = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            Customer.first_name,
+            Customer.last_name,
+            func.sum(Payment.amount).label('total_paid')
+        ).join(Payment
+        ).join(Invoice
+        ).join(Customer
+        ).filter(Payment.company_id == company_id)
+        
+        if filters.get('start_date'):
+            top_customers = top_customers.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            top_customers = top_customers.filter(Payment.payment_date <= filters['end_date'])
+        
+        top_customers = top_customers.group_by(
+            BankAccount.bank_name, BankAccount.account_number, Customer.first_name, Customer.last_name
+        ).order_by(func.sum(Payment.amount).desc()).limit(10).all()
+        
+        top_customers_data = []
+        for bank_name, account_number, first_name, last_name, total_paid in top_customers:
+            top_customers_data.append({
+                'bank_account': f"{bank_name} - {account_number}",
+                'customer_name': f"{first_name} {last_name}",
+                'total_paid': float(total_paid or 0)
+            })
+        
+        # 4. Average Transaction Value (per bank account)
+        avg_transaction = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.avg(Payment.amount).label('avg_amount'),
+            func.count(Payment.id).label('transaction_count')
+        ).join(Payment
+        ).filter(Payment.company_id == company_id)
+        
+        if filters.get('start_date'):
+            avg_transaction = avg_transaction.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            avg_transaction = avg_transaction.filter(Payment.payment_date <= filters['end_date'])
+        
+        avg_transaction = avg_transaction.group_by(
+            BankAccount.bank_name, BankAccount.account_number
+        ).all()
+        
+        transaction_metrics = []
+        for bank_name, account_number, avg_amount, count in avg_transaction:
+            transaction_metrics.append({
+                'bank_account': f"{bank_name} - {account_number}",
+                'avg_transaction_value': float(avg_amount or 0),
+                'transaction_count': count or 0
+            })
+        
+        # 5. Payment Method Distribution
+        payment_method_dist = db.session.query(
+            Payment.payment_method,
+            func.count(Payment.id).label('count'),
+            func.sum(Payment.amount).label('amount')
+        ).filter(Payment.company_id == company_id)
+        
+        if filters.get('start_date'):
+            payment_method_dist = payment_method_dist.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            payment_method_dist = payment_method_dist.filter(Payment.payment_date <= filters['end_date'])
+        
+        payment_method_dist = payment_method_dist.group_by(Payment.payment_method).all()
+        
+        payment_method_data = []
+        for method, count, amount in payment_method_dist:
+            payment_method_data.append({
+                'method': method or 'Unknown',
+                'count': count or 0,
+                'amount': float(amount or 0)
+            })
+        
+        # 6. Cash Flow Trends
+        cash_flow_trends = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.date_trunc('month', Payment.payment_date).label('month'),
+            func.sum(Payment.amount).label('amount')
+        ).join(Payment
+        ).filter(Payment.company_id == company_id)
+        
+        if filters.get('start_date'):
+            cash_flow_trends = cash_flow_trends.filter(Payment.payment_date >= filters['start_date'])
+        if filters.get('end_date'):
+            cash_flow_trends = cash_flow_trends.filter(Payment.payment_date <= filters['end_date'])
+        
+        cash_flow_trends = cash_flow_trends.group_by(
+            BankAccount.bank_name, BankAccount.account_number, 'month'
+        ).order_by('month').all()
+        
+        cash_flow_data = []
+        for bank_name, account_number, month, amount in cash_flow_trends:
+            cash_flow_data.append({
+                'bank_account': f"{bank_name} - {account_number}",
+                'month': month.strftime('%Y-%m'),
+                'amount': float(amount or 0)
+            })
+        
+        # 7. Collection Metrics
+        total_company_revenue = db.session.query(func.sum(Payment.amount)).filter(
+            Payment.company_id == company_id
+        ).scalar() or 1  # Avoid division by zero
+        
+        collection_metrics = []
+        for bank_account in bank_accounts:
+            account_revenue = db.session.query(func.sum(Payment.amount)).filter(
+                Payment.bank_account_id == bank_account.id,
+                Payment.company_id == company_id
+            ).scalar() or 0
+            
+            collection_ratio = (float(account_revenue) / float(total_company_revenue)) * 100
+            
+            collection_metrics.append({
+                'bank_account': f"{bank_account.bank_name} - {bank_account.account_number}",
+                'collection_ratio': round(collection_ratio, 2),
+                'total_collected': float(account_revenue)
+            })
+        
+        return {
+            'total_payments': len(payments_data) if payments_data else 0,
+            'payment_trends': payment_trends if payment_trends else [],
+            'account_performance': account_performance if account_performance else [],
+            'payment_method_distribution': payment_method_data if payment_method_data else [],
+            'top_customers': top_customers_data if top_customers_data else [],
+            'cash_flow_trends': cash_flow_data if cash_flow_data else [],
+            'collection_metrics': collection_metrics if collection_metrics else [],
+            'transaction_metrics': transaction_metrics if transaction_metrics else [],
+            'bank_accounts': [
+                {
+                    'id': str(acc.id),
+                    'name': f"{acc.bank_name} - {acc.account_number}"
+                }
+                for acc in bank_accounts
+            ] if bank_accounts else []
+        }
+        
+    except Exception as e:
+        print(f"Error fetching bank account analytics data: {str(e)}")
+        # Return empty structure on error
+        return {
+            'total_payments': 0,
+            'payment_trends': [],
+            'account_performance': [],
+            'payment_method_distribution': [],
+            'top_customers': [],
+            'cash_flow_trends': [],
+            'collection_metrics': [],
+            'transaction_metrics': [],
+            'bank_accounts': [],
+            'error': 'An error occurred while fetching bank account analytics data.'
+        }

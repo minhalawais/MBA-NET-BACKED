@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify,request
 from flask_jwt_extended import jwt_required, get_jwt_identity,get_jwt
 from app.crud import dashboard_crud
 from app.models import User
@@ -103,3 +103,21 @@ def get_recovery_collections():
     data = dashboard_crud.get_recovery_collections_data(company_id)
     return jsonify(data)
 
+
+@main.route('/dashboard/bank-account-analytics', methods=['GET'])
+@jwt_required()
+def get_bank_account_analytics():
+    current_user = get_jwt_identity()
+    claims = get_jwt()
+    company_id = claims['company_id']
+    
+    # Get filters from query parameters
+    filters = {
+        'start_date': request.args.get('start_date'),
+        'end_date': request.args.get('end_date'),
+        'bank_account_id': request.args.get('bank_account_id', 'all'),
+        'payment_method': request.args.get('payment_method', 'all')
+    }
+    
+    data = dashboard_crud.get_bank_account_analytics_data(company_id, filters)
+    return jsonify(data)
