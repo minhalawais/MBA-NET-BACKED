@@ -17,6 +17,7 @@ payment_type = ENUM(
     'maintenance', name='payment_type'
 )
 payment_method = ENUM('cash', 'online', 'bank_transfer', 'credit_card', name='payment_method')
+isp_payment_type = ENUM('monthly_subscription', 'bandwidth_usage', 'infrastructure', 'other', name='isp_payment_type')
 
 class Company(db.Model):
     __tablename__ = 'companies'
@@ -188,6 +189,45 @@ class Payment(db.Model):
     bank_account = db.relationship('BankAccount', backref=db.backref('payments', lazy=True))
     invoice = db.relationship('Invoice', backref=db.backref('payments', lazy=True))
     receiver = db.relationship('User', backref=db.backref('received_payments', lazy=True))
+    
+class ISPPayment(db.Model):
+    __tablename__ = 'isp_payments'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    isp_id = db.Column(UUID(as_uuid=True), db.ForeignKey('isps.id'), nullable=False)
+    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'), nullable=False)
+    
+    # Flexible payment tracking
+    payment_type = db.Column(isp_payment_type, nullable=False)
+    reference_number = db.Column(db.String(100))
+    description = db.Column(db.Text, nullable=False)
+    
+    # Financial details
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    payment_date = db.Column(db.Date, nullable=False)
+    billing_period = db.Column(db.String(50), nullable=False)
+    
+    # For usage-based payments
+    bandwidth_usage_gb = db.Column(db.Float)
+    rate_per_gb = db.Column(db.Numeric(10, 4))
+    
+    # Payment method and tracking
+    payment_method = db.Column(payment_method, nullable=False)
+    transaction_id = db.Column(db.String(100))
+    status = db.Column(db.String(20), default='completed')
+    payment_proof = db.Column(db.String(255))
+    processed_by = db.Column(UUID(as_uuid=True), db.ForeignKey('users.id'), nullable=False)
+    
+    # Timestamps
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    is_active = db.Column(db.Boolean, default=True)
+
+    # Relationships
+    company = relationship('Company', backref=db.backref('isp_payments', lazy=True))
+    isp = relationship('ISP', backref=db.backref('payments', lazy=True))
+    bank_account = relationship('BankAccount', backref=db.backref('isp_payments', lazy=True))
+    processor = relationship('User', backref=db.backref('processed_isp_payments', lazy=True))
     
 class BankAccount(db.Model):
     __tablename__ = 'bank_accounts'

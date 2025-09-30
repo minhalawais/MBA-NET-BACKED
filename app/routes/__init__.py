@@ -20,3 +20,4 @@ from . import log_routes
 from . import isp_routes
 from . import bank_account_routes
 from .employee_portal import *
+from . import isp_payment_routes

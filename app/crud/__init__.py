@@ -16,3 +16,4 @@ from .log_crud import *
 from .isp_crud import *
 from .bank_account_crud import *
 from .employee_crud import *
+from .isp_payment_crud import *
