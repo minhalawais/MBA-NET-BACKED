@@ -1,5 +1,5 @@
 from app import db
-from app.models import Customer, Invoice, Payment, Complaint, InventoryItem, User, BankAccount, ServicePlan, Area, Task, Supplier, InventoryAssignment, InventoryTransaction
+from app.models import Customer, Invoice, Payment,ISPPayment, Complaint, InventoryItem, User, BankAccount, ServicePlan, Area, Task, Supplier, InventoryAssignment, InventoryTransaction
 from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -7,6 +7,8 @@ import logging
 from pytz import UTC
 from sqlalchemy.exc import SQLAlchemyError
 from pytz import UTC  # Ensures consistent timezone handling
+import uuid
+from sqlalchemy.dialects.postgresql import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -936,3 +938,566 @@ def get_bank_account_analytics_data(company_id, filters=None):
             'bank_accounts': [],
             'error': 'An error occurred while fetching bank account analytics data.'
         }
+
+# In get_unified_financial_data function, add initial balance calculations:
+def get_unified_financial_data(company_id, filters=None):
+    try:
+        if filters is None:
+            filters = {}
+
+        start_date = filters.get('start_date')
+        end_date = filters.get('end_date')
+        bank_account_id = filters.get('bank_account_id')
+        invoice_status = filters.get('invoice_status')
+        payment_method = filters.get('payment_method')
+        isp_payment_type = filters.get('isp_payment_type')
+
+        kpi_data = get_financial_kpis(company_id, start_date, end_date, bank_account_id, invoice_status, payment_method, isp_payment_type)
+        cash_flow_data = get_cash_flow_analysis(company_id, start_date, end_date, bank_account_id, payment_method, isp_payment_type)
+        revenue_expense_data = get_revenue_expense_comparison(company_id, start_date, end_date, bank_account_id, invoice_status)
+        bank_performance_data = get_bank_account_performance(company_id, start_date, end_date, bank_account_id)
+        collections_data = get_collections_analysis(company_id, start_date, end_date, bank_account_id, invoice_status)
+        isp_payment_data = get_isp_payment_analysis(company_id, start_date, end_date, bank_account_id, isp_payment_type)
+
+        # NEW: Calculate initial balance summary
+        initial_balance_summary = get_initial_balance_summary(company_id, bank_account_id)
+        
+        # Update KPI data with initial balance
+        kpi_data['total_initial_balance'] = initial_balance_summary['total_initial_balance']
+        kpi_data['adjusted_cash_flow'] = kpi_data['net_cash_flow'] + initial_balance_summary['total_initial_balance']
+        
+        # Update cash flow data with initial balance
+        cash_flow_data['initial_balance'] = initial_balance_summary['total_initial_balance']
+        cash_flow_data['total_adjusted_flow'] = kpi_data['adjusted_cash_flow']
+        
+        # Add adjusted flow to monthly trends
+        for monthly_trend in cash_flow_data['monthly_trends']:
+            monthly_trend['adjusted_flow'] = monthly_trend['net_flow'] + initial_balance_summary['total_initial_balance']
+
+        bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
+        bank_accounts_list = [{'id': str(acc.id), 'name': f"{acc.bank_name} - {acc.account_number}"} for acc in bank_accounts]
+
+        return {
+            'kpis': kpi_data,
+            'cash_flow': cash_flow_data,
+            'revenue_expense': revenue_expense_data,
+            'bank_performance': bank_performance_data,
+            'collections': collections_data,
+            'isp_payments': isp_payment_data,
+            'filters': filters,
+            'bank_accounts': bank_accounts_list,
+            'initial_balance_summary': initial_balance_summary  # NEW
+        }
+    except Exception as e:
+        logger.error(f"Error getting unified financial data: {str(e)}")
+        return {'error': 'Failed to fetch unified financial data'}
+
+# NEW: Add function to calculate initial balance summary
+def get_initial_balance_summary(company_id, bank_account_id=None):
+    try:
+        query = BankAccount.query.filter_by(
+            company_id=company_id,
+            is_active=True
+        )
+        
+        if bank_account_id and bank_account_id != 'all':
+            query = query.filter(BankAccount.id == uuid.UUID(bank_account_id))
+            
+        bank_accounts = query.all()
+        
+        total_initial_balance = sum(float(acc.initial_balance or 0) for acc in bank_accounts)
+        accounts_with_balance = sum(1 for acc in bank_accounts if acc.initial_balance and float(acc.initial_balance) > 0)
+        average_balance = total_initial_balance / len(bank_accounts) if bank_accounts else 0
+        
+        return {
+            'total_initial_balance': total_initial_balance,
+            'accounts_with_balance': accounts_with_balance,
+            'average_balance': round(average_balance, 2)
+        }
+    except Exception as e:
+        logger.error(f"Error calculating initial balance summary: {str(e)}")
+        return {
+            'total_initial_balance': 0,
+            'accounts_with_balance': 0,
+            'average_balance': 0
+        }
+
+def get_financial_kpis(company_id, start_date=None, end_date=None, bank_account_id=None, invoice_status=None, payment_method=None, isp_payment_type=None):
+    try:
+        revenue_query = db.session.query(func.sum(Invoice.total_amount)).filter(
+            Invoice.company_id == company_id,
+            Invoice.is_active == True
+        )
+        if invoice_status and invoice_status != 'all':
+            revenue_query = revenue_query.filter(Invoice.status == invoice_status)
+
+        collections_query = db.session.query(func.sum(Payment.amount)).filter(
+            Payment.company_id == company_id,
+            Payment.is_active == True,
+            Payment.status == 'paid'
+        )
+        if bank_account_id and bank_account_id != 'all':
+            collections_query = collections_query.filter(Payment.bank_account_id == uuid.UUID(bank_account_id))
+        if payment_method and payment_method != 'all':
+            collections_query = collections_query.filter(Payment.payment_method == payment_method)
+
+        isp_payments_query = db.session.query(func.sum(ISPPayment.amount)).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True,
+            ISPPayment.status == 'completed'
+        )
+        if bank_account_id and bank_account_id != 'all':
+            isp_payments_query = isp_payments_query.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if isp_payment_type and isp_payment_type != 'all':
+            isp_payments_query = isp_payments_query.filter(ISPPayment.payment_type == isp_payment_type)
+
+        if start_date:
+            revenue_query = revenue_query.filter(Invoice.billing_start_date >= start_date)
+            collections_query = collections_query.filter(Payment.payment_date >= start_date)
+            isp_payments_query = isp_payments_query.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            revenue_query = revenue_query.filter(Invoice.billing_start_date <= end_date)
+            collections_query = collections_query.filter(Payment.payment_date <= end_date)
+            isp_payments_query = isp_payments_query.filter(ISPPayment.payment_date <= end_date)
+
+        total_revenue = revenue_query.scalar() or 0
+        total_collections = collections_query.scalar() or 0
+        total_isp_payments = isp_payments_query.scalar() or 0
+
+        net_cash_flow = float(total_collections) - float(total_isp_payments)
+        collection_efficiency = (float(total_collections) / float(total_revenue) * 100) if float(total_revenue) > 0 else 0
+        operating_profit = float(total_collections) - float(total_isp_payments)
+
+        return {
+            'total_revenue': float(total_revenue),
+            'total_collections': float(total_collections),
+            'total_isp_payments': float(total_isp_payments),
+            'net_cash_flow': net_cash_flow,
+            'collection_efficiency': round(collection_efficiency, 2),
+            'operating_profit': round(operating_profit, 2)
+        }
+    except Exception as e:
+        logger.error(f"Error calculating financial KPIs: {str(e)}")
+        return {}
+
+def get_cash_flow_analysis(company_id, start_date=None, end_date=None, bank_account_id=None, payment_method=None, isp_payment_type=None):
+    try:
+        cash_flow_query = db.session.query(
+            func.date_trunc('month', Payment.payment_date).label('month'),
+            func.sum(Payment.amount).label('inflow'),
+            func.sum(ISPPayment.amount).label('outflow')
+        ).outerjoin(
+            ISPPayment,
+            (func.date_trunc('month', Payment.payment_date) == func.date_trunc('month', ISPPayment.payment_date)) &
+            (Payment.company_id == ISPPayment.company_id)
+        ).filter(
+            Payment.company_id == company_id,
+            Payment.is_active == True,
+            Payment.status == 'paid'
+        )
+
+        if bank_account_id and bank_account_id != 'all':
+            cash_flow_query = cash_flow_query.filter(Payment.bank_account_id == uuid.UUID(bank_account_id))
+        if payment_method and payment_method != 'all':
+            cash_flow_query = cash_flow_query.filter(Payment.payment_method == payment_method)
+
+        if start_date:
+            cash_flow_query = cash_flow_query.filter(Payment.payment_date >= start_date)
+        if end_date:
+            cash_flow_query = cash_flow_query.filter(Payment.payment_date <= end_date)
+
+        if bank_account_id and bank_account_id != 'all':
+            cash_flow_query = cash_flow_query.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if isp_payment_type and isp_payment_type != 'all':
+            cash_flow_query = cash_flow_query.filter(ISPPayment.payment_type == isp_payment_type)
+
+        cash_flow_data = cash_flow_query.group_by('month').order_by('month').all()
+
+        inflow_methods = db.session.query(
+            Payment.payment_method,
+            func.sum(Payment.amount).label('amount')
+        ).filter(
+            Payment.company_id == company_id,
+            Payment.is_active == True,
+            Payment.status == 'paid'
+        )
+        if bank_account_id and bank_account_id != 'all':
+            inflow_methods = inflow_methods.filter(Payment.bank_account_id == uuid.UUID(bank_account_id))
+        if payment_method and payment_method != 'all':
+            inflow_methods = inflow_methods.filter(Payment.payment_method == payment_method)
+        if start_date:
+            inflow_methods = inflow_methods.filter(Payment.payment_date >= start_date)
+        if end_date:
+            inflow_methods = inflow_methods.filter(Payment.payment_date <= end_date)
+        inflow_methods = inflow_methods.group_by(Payment.payment_method).all()
+
+        outflow_types = db.session.query(
+            ISPPayment.payment_type,
+            func.sum(ISPPayment.amount).label('amount')
+        ).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True
+        )
+        if bank_account_id and bank_account_id != 'all':
+            outflow_types = outflow_types.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if isp_payment_type and isp_payment_type != 'all':
+            outflow_types = outflow_types.filter(ISPPayment.payment_type == isp_payment_type)
+        if start_date:
+            outflow_types = outflow_types.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            outflow_types = outflow_types.filter(ISPPayment.payment_date <= end_date)
+        outflow_types = outflow_types.group_by(ISPPayment.payment_type).all()
+
+        return {
+            'monthly_trends': [
+                {
+                    'month': month.strftime('%Y-%m'),
+                    'inflow': float(inflow or 0),
+                    'outflow': float(outflow or 0),
+                    'net_flow': float((inflow or 0) - (outflow or 0))
+                } for month, inflow, outflow in cash_flow_data
+            ],
+            'inflow_breakdown': [{'method': m, 'amount': float(a or 0)} for m, a in inflow_methods],
+            'outflow_breakdown': [{'type': t, 'amount': float(a or 0)} for t, a in outflow_types]
+        }
+    except Exception as e:
+        logger.error(f"Error calculating cash flow analysis: {str(e)}")
+        return {}
+
+def get_revenue_expense_comparison(company_id, start_date=None, end_date=None, bank_account_id=None, invoice_status=None):
+    try:
+        # Calculate REVENUE separately (from Invoices)
+        revenue_query = db.session.query(
+            func.date_trunc('month', Invoice.billing_start_date).label('month'),
+            func.sum(Invoice.total_amount).label('revenue')
+        ).filter(
+            Invoice.company_id == company_id,
+            Invoice.is_active == True
+        )
+        
+        if invoice_status and invoice_status != 'all':
+            revenue_query = revenue_query.filter(Invoice.status == invoice_status)
+        if start_date:
+            revenue_query = revenue_query.filter(Invoice.billing_start_date >= start_date)
+        if end_date:
+            revenue_query = revenue_query.filter(Invoice.billing_start_date <= end_date)
+            
+        revenue_data = revenue_query.group_by('month').order_by('month').all()
+        
+        # Calculate EXPENSES separately (from ISPPayments)
+        expense_query = db.session.query(
+            func.date_trunc('month', ISPPayment.payment_date).label('month'),
+            func.sum(ISPPayment.amount).label('expenses')
+        ).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True,
+            ISPPayment.status == 'completed'  # Only count completed payments
+        )
+        
+        if bank_account_id and bank_account_id != 'all':
+            expense_query = expense_query.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if start_date:
+            expense_query = expense_query.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            expense_query = expense_query.filter(ISPPayment.payment_date <= end_date)
+            
+        expense_data = expense_query.group_by('month').order_by('month').all()
+        
+        # Debug logging to identify the issue
+        logger.info(f"Revenue data points: {len(revenue_data)}")
+        logger.info(f"Expense data points: {len(expense_data)}")
+        
+        # Create dictionaries for easy merging
+        revenue_dict = {month.strftime('%Y-%m'): float(revenue or 0) for month, revenue in revenue_data}
+        expense_dict = {month.strftime('%Y-%m'): float(expenses or 0) for month, expenses in expense_data}
+        
+        # Get all unique months from both datasets
+        all_months = sorted(set(list(revenue_dict.keys()) + list(expense_dict.keys())))
+        
+        # Combine the data
+        monthly_comparison = []
+        total_revenue = 0
+        total_expenses = 0
+        
+        for month in all_months:
+            revenue = revenue_dict.get(month, 0)
+            expenses = expense_dict.get(month, 0)
+            ratio = (expenses / revenue * 100) if revenue > 0 else 0
+            
+            monthly_comparison.append({
+                'month': month,
+                'revenue': revenue,
+                'expenses': expenses,
+                'ratio': ratio
+            })
+            
+            total_revenue += revenue
+            total_expenses += expenses
+        
+        # Calculate average ratio (only for months with revenue)
+        months_with_revenue = [item for item in monthly_comparison if item['revenue'] > 0]
+        average_ratio = sum(item['ratio'] for item in months_with_revenue) / len(months_with_revenue) if months_with_revenue else 0
+        
+        # Additional debug info
+        logger.info(f"Total revenue: {total_revenue}")
+        logger.info(f"Total expenses: {total_expenses}")
+        logger.info(f"Average ratio: {average_ratio}")
+        
+        return {
+            'monthly_comparison': monthly_comparison,
+            'total_revenue': total_revenue,
+            'total_expenses': total_expenses,
+            'average_ratio': round(average_ratio, 1)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating revenue expense comparison: {str(e)}")
+        # Return empty structure on error
+        return {
+            'monthly_comparison': [],
+            'total_revenue': 0,
+            'total_expenses': 0,
+            'average_ratio': 0
+        }
+
+def get_bank_account_performance(company_id, start_date=None, end_date=None, bank_account_id=None):
+    try:
+        # Get collections per bank account
+        collections_query = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.sum(Payment.amount).label('collections')
+        ).join(Payment, BankAccount.id == Payment.bank_account_id
+        ).filter(
+            BankAccount.company_id == company_id,
+            BankAccount.is_active == True,
+            Payment.is_active == True,
+            Payment.status == 'paid'
+        )
+        
+        if bank_account_id and bank_account_id != 'all':
+            collections_query = collections_query.filter(BankAccount.id == uuid.UUID(bank_account_id))
+        if start_date:
+            collections_query = collections_query.filter(Payment.payment_date >= start_date)
+        if end_date:
+            collections_query = collections_query.filter(Payment.payment_date <= end_date)
+            
+        collections_query = collections_query.group_by(BankAccount.bank_name, BankAccount.account_number)
+        collections_data = collections_query.all()
+        
+        # Get ISP payments per bank account
+        isp_payments_query = db.session.query(
+            BankAccount.bank_name,
+            BankAccount.account_number,
+            func.sum(ISPPayment.amount).label('payments')
+        ).join(ISPPayment, BankAccount.id == ISPPayment.bank_account_id
+        ).filter(
+            BankAccount.company_id == company_id,
+            BankAccount.is_active == True,
+            ISPPayment.is_active == True,
+            ISPPayment.status == 'completed'
+        )
+        
+        if bank_account_id and bank_account_id != 'all':
+            isp_payments_query = isp_payments_query.filter(BankAccount.id == uuid.UUID(bank_account_id))
+        if start_date:
+            isp_payments_query = isp_payments_query.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            isp_payments_query = isp_payments_query.filter(ISPPayment.payment_date <= end_date)
+            
+        isp_payments_query = isp_payments_query.group_by(BankAccount.bank_name, BankAccount.account_number)
+        isp_payments_data = isp_payments_query.all()
+        
+        # Create dictionaries for easy lookup
+        collections_dict = {}
+        for bank_name, account_number, collections in collections_data:
+            key = f"{bank_name}-{account_number}"
+            collections_dict[key] = float(collections or 0)
+        
+        payments_dict = {}
+        for bank_name, account_number, payments in isp_payments_data:
+            key = f"{bank_name}-{account_number}"
+            payments_dict[key] = float(payments or 0)
+        
+        # Get all bank accounts to ensure we show all, even with zero transactions
+        all_bank_accounts = BankAccount.query.filter_by(
+            company_id=company_id, 
+            is_active=True
+        ).all()
+        
+        performance_data = []
+        for account in all_bank_accounts:
+            key = f"{account.bank_name}-{account.account_number}"
+            collections = collections_dict.get(key, 0)
+            payments = payments_dict.get(key, 0)
+            net_flow = collections - payments
+            initial_balance = float(account.initial_balance or 0)  # NEW
+            
+            # Calculate utilization rate (collections / (collections + payments))
+            total_flow = collections + payments
+            utilization_rate = (collections / total_flow * 100) if total_flow > 0 else 0
+            
+            performance_data.append({
+                'bank_name': account.bank_name,
+                'account_number': account.account_number,
+                'collections': collections,
+                'payments': payments,
+                'net_flow': net_flow,
+                'initial_balance': initial_balance,  # NEW
+                'utilization_rate': round(utilization_rate, 2)
+            })
+        
+        return performance_data
+        
+    except Exception as e:
+        logger.error(f"Error calculating bank account performance: {str(e)}")
+        return []
+
+def get_collections_analysis(company_id, start_date=None, end_date=None, bank_account_id=None, invoice_status=None):
+    try:
+        current_date = datetime.utcnow().date()
+        aging_query = db.session.query(
+            Invoice.id,
+            Invoice.total_amount,
+            Invoice.due_date,
+            func.coalesce(func.sum(Payment.amount), 0).label('paid_amount')
+        ).outerjoin(Payment, Invoice.id == Payment.invoice_id
+        ).filter(
+            Invoice.company_id == company_id,
+            Invoice.is_active == True,
+            Invoice.status != 'paid'
+        )
+        if invoice_status and invoice_status != 'all':
+            aging_query = aging_query.filter(Invoice.status == invoice_status)
+        if start_date:
+            aging_query = aging_query.filter(Invoice.billing_start_date >= start_date)
+        if end_date:
+            aging_query = aging_query.filter(Invoice.billing_start_date <= end_date)
+        if bank_account_id and bank_account_id != 'all':
+            aging_query = aging_query.filter((Payment.bank_account_id == uuid.UUID(bank_account_id)) | (Payment.bank_account_id.is_(None)))
+        aging_query = aging_query.group_by(Invoice.id, Invoice.total_amount, Invoice.due_date)
+        aging_data = aging_query.all()
+
+        aging_buckets = {
+            '0-30': 0,
+            '31-60': 0,
+            '61-90': 0,
+            '90+': 0
+        }
+        
+        for invoice_id, total_amount, due_date, paid_amount in aging_data:
+            if due_date:
+                days_overdue = (current_date - due_date).days
+                outstanding = float(total_amount) - float(paid_amount)
+                
+                if days_overdue <= 30:
+                    aging_buckets['0-30'] += outstanding
+                elif days_overdue <= 60:
+                    aging_buckets['31-60'] += outstanding
+                elif days_overdue <= 90:
+                    aging_buckets['61-90'] += outstanding
+                else:
+                    aging_buckets['90+'] += outstanding
+        collection_trends = db.session.query(
+            func.date_trunc('month', Payment.payment_date).label('month'),
+            func.count(Payment.id).label('payment_count'),
+            func.sum(Payment.amount).label('collection_amount')
+        ).filter(
+            Payment.company_id == company_id,
+            Payment.is_active == True,
+            Payment.status == 'paid'
+        )
+        if bank_account_id and bank_account_id != 'all':
+            collection_trends = collection_trends.filter(Payment.bank_account_id == uuid.UUID(bank_account_id))
+        if start_date:
+            collection_trends = collection_trends.filter(Payment.payment_date >= start_date)
+        if end_date:
+            collection_trends = collection_trends.filter(Payment.payment_date <= end_date)
+        collection_trends = collection_trends.group_by('month').order_by('month').all()
+        
+        return {
+            'aging_analysis': [
+                {'bucket': bucket, 'amount': amount}
+                for bucket, amount in aging_buckets.items()
+            ],
+            'collection_trends': [
+                {
+                    'month': month.strftime('%Y-%m'),
+                    'payment_count': count or 0,
+                    'collection_amount': float(amount or 0)
+                }
+                for month, count, amount in collection_trends
+            ],
+            'total_outstanding': sum(aging_buckets.values())
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating collections analysis: {str(e)}")
+        return {}
+
+def get_isp_payment_analysis(company_id, start_date=None, end_date=None, bank_account_id=None, isp_payment_type=None):
+    try:
+        payment_types = db.session.query(
+            ISPPayment.payment_type,
+            func.sum(ISPPayment.amount).label('total_amount'),
+            func.avg(ISPPayment.amount).label('avg_amount'),
+            func.count(ISPPayment.id).label('payment_count')
+        ).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True
+        )
+        if bank_account_id and bank_account_id != 'all':
+            payment_types = payment_types.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if isp_payment_type and isp_payment_type != 'all':
+            payment_types = payment_types.filter(ISPPayment.payment_type == isp_payment_type)
+        if start_date:
+            payment_types = payment_types.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            payment_types = payment_types.filter(ISPPayment.payment_date <= end_date)
+        payment_types = payment_types.group_by(ISPPayment.payment_type).all()
+
+        bandwidth_costs = db.session.query(
+            func.date_trunc('month', ISPPayment.payment_date).label('month'),
+            func.sum(ISPPayment.amount).label('total_cost'),
+            func.sum(ISPPayment.bandwidth_usage_gb).label('total_usage')
+        ).filter(
+            ISPPayment.company_id == company_id,
+            ISPPayment.is_active == True,
+            ISPPayment.payment_type == 'bandwidth_usage'
+        )
+        if bank_account_id and bank_account_id != 'all':
+            bandwidth_costs = bandwidth_costs.filter(ISPPayment.bank_account_id == uuid.UUID(bank_account_id))
+        if start_date:
+            bandwidth_costs = bandwidth_costs.filter(ISPPayment.payment_date >= start_date)
+        if end_date:
+            bandwidth_costs = bandwidth_costs.filter(ISPPayment.payment_date <= end_date)
+        bandwidth_costs = bandwidth_costs.group_by('month').order_by('month').all()
+        
+        # Calculate cost per GB
+        bandwidth_analysis = []
+        for month, total_cost, total_usage in bandwidth_costs:
+            cost_per_gb = float(total_cost or 0) / float(total_usage or 1) if total_usage and total_usage > 0 else 0
+            bandwidth_analysis.append({
+                'month': month.strftime('%Y-%m'),
+                'total_cost': float(total_cost or 0),
+                'total_usage': float(total_usage or 0),
+                'cost_per_gb': round(cost_per_gb, 4)
+            })
+        
+        return {
+            'payment_types': [
+                {
+                    'type': payment_type,
+                    'total_amount': float(total_amount or 0),
+                    'avg_amount': float(avg_amount or 0),
+                    'payment_count': payment_count or 0
+                }
+                for payment_type, total_amount, avg_amount, payment_count in payment_types
+            ],
+            'bandwidth_analysis': bandwidth_analysis,
+            'total_isp_payments': sum(float(total_amount or 0) for _, total_amount, _, _ in payment_types)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating ISP payment analysis: {str(e)}")
+        return {}
