@@ -456,3 +456,36 @@ class ISP(db.Model):
     is_active = db.Column(db.Boolean, default=True)
 
     customers = relationship('Customer', back_populates='isp')
+# Add this to your models.py file
+
+class ExpenseType(db.Model):
+    __tablename__ = 'expense_types'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    company = relationship('Company', backref=db.backref('expense_types', lazy=True))
+
+# Update the Expense model to use dynamic expense types
+class Expense(db.Model):
+    __tablename__ = 'expenses'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'))
+    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'), nullable=True)
+    expense_type_id = db.Column(UUID(as_uuid=True), db.ForeignKey('expense_types.id'), nullable=False)  # Changed from expense_type enum
+    description = db.Column(db.Text)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    expense_date = db.Column(db.Date, nullable=False)
+    payment_method = db.Column(db.String(20))
+    vendor_payee = db.Column(db.String(255))
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    is_active = db.Column(db.Boolean, default=True)
+
+    company = relationship('Company', backref=db.backref('expenses', lazy=True))
+    bank_account = relationship('BankAccount', backref=db.backref('expenses', lazy=True))
+    expense_type = relationship('ExpenseType', backref=db.backref('expenses', lazy=True))
