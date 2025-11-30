@@ -42,6 +42,7 @@ def create_app():
         from .routes import main
         from .auth import auth
         from . import models
+        from . import whatsapp_models  # Import WhatsApp models
         app.register_blueprint(main)
         app.register_blueprint(auth, url_prefix='/auth')
         db.create_all()

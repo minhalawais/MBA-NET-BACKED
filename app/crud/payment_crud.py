@@ -1,12 +1,13 @@
 from app import db
-from app.models import Payment, Customer, Invoice, Company, BankAccount
+from app.models import Payment, Customer, Invoice, Company, BankAccount,User
 from app.utils.logging_utils import log_action
 import uuid
 import logging
 import os
 from werkzeug.utils import secure_filename
-from sqlalchemy import func  # ADD THIS IMPORT
+from sqlalchemy import func, or_, asc, desc
 from decimal import Decimal  # ADD THIS IMPORT
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,16 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
         if not invoice:
             raise ValueError("Invalid invoice_id")
 
+        # Combine date and time for payment_date
+        payment_date_str = data['payment_date']
+        payment_time_str = data.get('payment_time', '00:00')
+        
+        try:
+            # Parse combined datetime
+            payment_datetime = datetime.strptime(f"{payment_date_str} {payment_time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            raise ValueError("Invalid payment date or time format")
+
         # Calculate total paid amount for this invoice
         total_paid = db.session.query(func.sum(Payment.amount)).filter(
             Payment.invoice_id == uuid.UUID(data['invoice_id']),
@@ -99,10 +110,10 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
                 company_id=uuid.UUID(data['company_id']),
                 invoice_id=uuid.UUID(data['invoice_id']),
                 amount=current_payment_amount,
-                payment_date=data['payment_date'],
+                payment_date=payment_datetime,  # Use combined datetime
                 payment_method=data['payment_method'],
                 transaction_id=data.get('transaction_id'),
-                status=data['status'],  # paid, failed, etc.
+                status=data['status'],
                 failure_reason=data.get('failure_reason'),
                 received_by=uuid.UUID(data['received_by']),
                 bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,
@@ -150,23 +161,7 @@ def add_payment(data, user_role, current_user_id, ip_address, user_agent):
         logger.error(f"Error adding payment: {str(e)}")
         db.session.rollback()
         raise PaymentError("Failed to create payment")
-def fetch_active_bank_accounts(company_id):
-    try:
-        bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
-        return [
-            {
-                'id': str(account.id),
-                'bank_name': account.bank_name,
-                'account_title': account.account_title,
-                'account_number': account.account_number,
-                'iban': account.iban,
-                'branch_code': account.branch_code,
-                'branch_address': account.branch_address
-            }
-            for account in bank_accounts
-        ]
-    except Exception as e:
-        raise Exception(f"Database operation failed: {str(e)}")
+
 def update_payment(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
         if user_role == 'super_admin':
@@ -201,8 +196,15 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
             payment.invoice_id = uuid.UUID(data['invoice_id'])
         if 'amount' in data:
             payment.amount = float(data['amount'])
-        if 'payment_date' in data:
-            payment.payment_date = data['payment_date']
+        if 'payment_date' in data and 'payment_time' in data:
+            # Combine date and time
+            payment_datetime = datetime.strptime(f"{data['payment_date']} {data['payment_time']}", "%Y-%m-%d %H:%M")
+            payment.payment_date = payment_datetime
+        elif 'payment_date' in data:
+            # Keep existing time if only date is provided
+            existing_time = payment.payment_date.time()
+            payment_date = datetime.strptime(data['payment_date'], "%Y-%m-%d").date()
+            payment.payment_date = datetime.combine(payment_date, existing_time)
         if 'payment_method' in data:
             payment.payment_method = data['payment_method']
         if 'transaction_id' in data:
@@ -214,7 +216,6 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
         if 'received_by' in data:
             payment.received_by = uuid.UUID(data['received_by'])
         if 'is_active' in data:
-            # Convert string boolean to actual boolean
             if isinstance(data['is_active'], str):
                 payment.is_active = data['is_active'].lower() == 'true'
             else:
@@ -225,7 +226,6 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
         # Handle payment proof update
         if 'payment_proof' in data and data['payment_proof']:
             try:
-                # Delete old file if it exists and is different from new one
                 if payment.payment_proof and os.path.exists(payment.payment_proof) and payment.payment_proof != data['payment_proof']:
                     os.remove(payment.payment_proof)
                 
@@ -266,6 +266,23 @@ def update_payment(id, data, company_id, user_role, current_user_id, ip_address,
         logger.error(f"Error updating payment {id}: {str(e)}")
         db.session.rollback()
         raise PaymentError("Failed to update payment")
+def fetch_active_bank_accounts(company_id):
+    try:
+        bank_accounts = BankAccount.query.filter_by(company_id=company_id, is_active=True).all()
+        return [
+            {
+                'id': str(account.id),
+                'bank_name': account.bank_name,
+                'account_title': account.account_title,
+                'account_number': account.account_number,
+                'iban': account.iban,
+                'branch_code': account.branch_code,
+                'branch_address': account.branch_address
+            }
+            for account in bank_accounts
+        ]
+    except Exception as e:
+        raise Exception(f"Database operation failed: {str(e)}")
 
 def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
@@ -279,6 +296,9 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
         if not payment:
             raise ValueError(f"Payment with id {id} not found")
 
+        # Store invoice_id before deletion for status update
+        invoice_id = payment.invoice_id
+        
         old_values = {
             'invoice_id': str(payment.invoice_id),
             'amount': float(payment.amount),
@@ -299,8 +319,43 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
             except OSError as e:
                 logger.error(f"Error deleting payment proof file: {str(e)}")
 
+        # Delete the payment
         db.session.delete(payment)
         db.session.commit()
+
+        # Update invoice status after payment deletion
+        try:
+            # Get all remaining active payments for this invoice
+            remaining_payments = Payment.query.filter(
+                Payment.invoice_id == invoice_id,
+                Payment.is_active == True,
+                Payment.id != uuid.UUID(id)  # Exclude the deleted payment
+            ).all()
+            
+            # Calculate total paid amount from remaining payments
+            total_paid = sum(p.amount for p in remaining_payments if p.status == 'paid')
+            
+            # Get the invoice
+            invoice = Invoice.query.get(invoice_id)
+            if invoice:
+                if total_paid == 0:
+                    # No payments left, set to pending
+                    invoice.status = 'pending'
+                elif total_paid >= invoice.total_amount:
+                    # Fully paid with remaining payments
+                    invoice.status = 'paid'
+                elif total_paid > 0:
+                    # Some payment remains
+                    invoice.status = 'partially_paid'
+                else:
+                    # No successful payments
+                    invoice.status = 'pending'
+                
+                db.session.commit()
+                
+        except Exception as e:
+            logger.error(f"Error updating invoice status after payment deletion: {str(e)}")
+            # Don't rollback the payment deletion, just log the error
 
         log_action(
             current_user_id,
@@ -309,10 +364,10 @@ def delete_payment(id, company_id, user_role, current_user_id, ip_address, user_
             payment.id,
             old_values,
             None,
-                        ip_address,
+            ip_address,
             user_agent,
             company_id
-)
+        )
 
         return True
     except ValueError as e:
@@ -376,3 +431,107 @@ def get_payment_by_invoice_id(invoice_id, company_id=None):
     except Exception as e:
         logger.error(f"Error getting payments for invoice {invoice_id}: {str(e)}")
         raise PaymentError("Failed to retrieve payment details")
+
+def _base_scope(company_id, user_role, employee_id):
+    q = db.session.query(Payment).join(Invoice, Payment.invoice_id == Invoice.id)\
+                                 .join(Customer, Invoice.customer_id == Customer.id)\
+                                 .join(User, Payment.received_by == User.id)\
+                                 .outerjoin(BankAccount, Payment.bank_account_id == BankAccount.id)
+    if user_role == 'super_admin':
+        return q
+    elif user_role == 'auditor':
+        return q.filter(Payment.is_active == True, Payment.company_id == company_id)
+    elif user_role == 'company_owner':
+        return q.filter(Payment.company_id == company_id)
+    elif user_role == 'employee':
+        return q.filter(Payment.received_by == employee_id)
+    return q.filter(Payment.company_id == company_id)
+
+def _apply_filters(q, qtext, filters):
+    if qtext:
+        like = f"%{qtext}%"
+        q = q.filter(or_(
+            Invoice.invoice_number.ilike(like),
+            Customer.first_name.ilike(like),
+            Customer.last_name.ilike(like),
+            Payment.payment_method.ilike(like),
+            Payment.transaction_id.ilike(like),
+        ))
+    # Column-specific filters
+    if filters.get('status'):
+        q = q.filter(Payment.status == filters['status'])
+    if filters.get('payment_method'):
+        q = q.filter(Payment.payment_method == filters['payment_method'])
+    if filters.get('bank_account_details'):
+        # match bank_name or account_number
+        like = f"%{filters['bank_account_details']}%"
+        q = q.filter(or_(BankAccount.bank_name.ilike(like), BankAccount.account_number.ilike(like)))
+    if filters.get('payment_date_from'):
+        q = q.filter(Payment.payment_date >= filters['payment_date_from'])
+    if filters.get('payment_date_to'):
+        q = q.filter(Payment.payment_date <= filters['payment_date_to'])
+    return q
+
+def _apply_sort(q, sort_by, sort_dir):
+    colmap = {
+        'invoice_number': Invoice.invoice_number,
+        'customer_name': Customer.first_name,  # simple first_name sort
+        'amount': Payment.amount,
+        'payment_date': Payment.payment_date,
+        'payment_method': Payment.payment_method,
+        'status': Payment.status,
+        'received_by': User.first_name,
+    }
+    col = colmap.get(sort_by or 'payment_date', Payment.payment_date)
+    direction = desc if (sort_dir or 'desc').lower() == 'desc' else asc
+    return q.order_by(direction(col))
+
+def _row_to_dict(p: Payment):
+    return {
+        'id': str(p.id),
+        'invoice_id': str(p.invoice_id),
+        'invoice_number': p.invoice.invoice_number,
+        'customer_name': f"{p.invoice.customer.first_name} {p.invoice.customer.last_name}",
+        'amount': float(p.amount),
+        'payment_date': p.payment_date.isoformat(),
+        'payment_method': p.payment_method,
+        'transaction_id': p.transaction_id,
+        'status': p.status,
+        'failure_reason': p.failure_reason,
+        'payment_proof': p.payment_proof,
+        'received_by': f"{p.receiver.first_name} {p.receiver.last_name}",
+        'is_active': p.is_active,
+        'bank_account_id': str(p.bank_account_id) if p.bank_account_id else None,
+        'bank_account_details': f"{p.bank_account.bank_name} - {p.bank_account.account_number}" if p.bank_account else None,
+    }
+
+def list_payments_paginated(company_id, user_role, employee_id, page, page_size, sort_by, sort_dir, q=None, filters=None):
+    filters = filters or {}
+    base = _base_scope(company_id, user_role, employee_id)
+    base = _apply_filters(base, q, filters)
+    total = base.count()
+    base = _apply_sort(base, sort_by, sort_dir)
+    rows = base.limit(page_size).offset((page - 1) * page_size).all()
+    return ([_row_to_dict(p) for p in rows], total)
+
+def get_payments_summary(company_id, user_role, employee_id):
+    base = _base_scope(company_id, user_role, employee_id)
+    total = base.count()
+    active = base.filter(Payment.is_active == True).count()
+    total_amount = db.session.query(func.coalesce(func.sum(Payment.amount), 0)).select_from(Payment).scalar() or 0
+    return {
+        'total': int(total),
+        'active': int(active),
+        'totalAmount': float(total_amount),
+    }
+
+def stream_payments(company_id, user_role, employee_id, sort_by, sort_dir, qtext, filters):
+    from flask import current_app
+    
+    # Use application context for database operations
+    with current_app.app_context():
+        q = _base_scope(company_id, user_role, employee_id)
+        q = _apply_filters(q, qtext, filters)
+        q = _apply_sort(q, sort_by, sort_dir)
+        for p in q.yield_per(1000):  # efficient streaming
+            yield _row_to_dict(p)

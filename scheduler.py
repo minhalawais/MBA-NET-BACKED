@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import logging
 from app import db
 from app.models import Customer, Invoice, ServicePlan
@@ -8,6 +8,12 @@ from app.crud.invoice_crud import generate_invoice_number, add_invoice
 import uuid
 from app.utils.backup_utils import PostgreSQLBackupManager  # Updated import
 import os
+
+# WhatsApp imports
+from app.models import WhatsAppConfig
+from app.services.whatsapp_queue_service import WhatsAppQueueService
+from app.services.whatsapp_rate_limiter import WhatsAppRateLimiter
+from app.services.whatsapp_api_client import WhatsAppAPIClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -244,6 +250,192 @@ def cleanup_old_backups_job(app=None):
         except Exception as e:
             logger.error(f"Error in backup cleanup job: {str(e)}")
 
+def process_whatsapp_queue(app=None):
+    """
+    Process pending WhatsApp messages in queue.
+    Sends up to remaining daily quota ordered by priority.
+    Runs daily at configured time (default 9:00 AM).
+    """
+    logger.info(f"Running WhatsApp queue processor: {datetime.now()}")
+    
+    if not app:
+        logger.error("No Flask app provided to process_whatsapp_queue")
+        return
+    
+    with app.app_context():
+        try:
+            # Get all companies with WhatsApp configured
+            configs = WhatsAppConfig.query.filter_by(auto_send_invoices=True).all()
+            
+            for config in configs:
+                company_id = str(config.company_id)
+                
+                # Check remaining quota
+                remaining = WhatsAppRateLimiter.get_remaining_quota(company_id)
+                
+                if remaining <= 0:
+                    logger.info(f"Quota exhausted for company {company_id}")
+                    continue
+                
+                # Get pending messages
+                messages = WhatsAppQueueService.get_pending_messages(
+                    limit=remaining,
+                    company_id=company_id
+                )
+                
+                logger.info(f"Processing {len(messages)} messages for company {company_id}")
+                
+                # Initialize API client
+                client = WhatsAppAPIClient.from_config(company_id)
+                
+                sent_count = 0
+                failed_count = 0
+                
+                for message in messages:
+                    try:
+                        # Send message based on media type
+                        if message.media_type == 'document':
+                            result = client.send_document_message(
+                                mobile=message.mobile,
+                                document_url=message.media_url,
+                                caption=message.message_content,
+                                priority=message.priority
+                            )
+                        elif message.media_type == 'image':
+                            result = client.send_image_message(
+                                mobile=message.mobile,
+                                image_url=message.media_url,
+                                caption=message.message_content,
+                                priority=message.priority
+                            )
+                        else:  # text
+                            result = client.send_text_message(
+                                mobile=message.mobile,
+                                message=message.message_content,
+                                priority=message.priority
+                            )
+                        
+                        if result['success']:
+                            # Update message status to sent
+                            WhatsAppQueueService.update_message_status(
+                                message_id=str(message.id),
+                                status='sent',
+                                api_response=result.get('response')
+                            )
+                            
+                            # Increment quota
+                            WhatsAppRateLimiter.increment_sent_count(company_id)
+                            sent_count += 1
+                            
+                        else:
+                            # Update message status to failed
+                            WhatsAppQueueService.update_message_status(
+                                message_id=str(message.id),
+                                status='failed',
+                                error_message=result.get('error')
+                            )
+                            failed_count += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error sending message {message.id}: {str(e)}")
+                        WhatsAppQueueService.update_message_status(
+                            message_id=str(message.id),
+                            status='failed',
+                            error_message=str(e)
+                        )
+                        failed_count += 1
+                
+                logger.info(f"Completed WhatsApp queue processing for company {company_id}: {sent_count} sent, {failed_count} failed")
+            
+        except Exception as e:
+            logger.error(f"Error in WhatsApp queue processing: {str(e)}")
+
+def check_deadline_alerts(app=None):
+    """
+    Check for invoices with upcoming due dates and enqueue alert messages.
+    Runs daily at configured time (default 9:00 AM).
+    """
+    logger.info(f"Running deadline alerts check: {datetime.now()}")
+    
+    if not app:
+        logger.error("No Flask app provided to check_deadline_alerts")
+        return
+    
+    with app.app_context():
+        try:
+            # Get all companies with deadline alerts enabled
+            configs = WhatsAppConfig.query.filter_by(auto_send_deadline_alerts=True).all()
+            
+            for config in configs:
+                company_id = str(config.company_id)
+                days_before = config.deadline_alert_days_before
+                
+                # Calculate target due date (today + days_before)
+                target_date = date.today() + timedelta(days=days_before)
+                
+                # Find invoices due on target date that are still pending/overdue
+                invoices = Invoice.query.filter(
+                    Invoice.company_id == company_id,
+                    Invoice.due_date == target_date,
+                    Invoice.status.in_(['pending', 'partially_paid', 'overdue']),
+                    Invoice.is_active == True
+                ).all()
+                
+                logger.info(f"Found {len(invoices)} invoices due in {days_before} days for company {company_id}")
+                
+                for invoice in invoices:
+                    try:
+                        # Check if alert already sent for this invoice
+                        existing_alert = db.session.query(WhatsAppMessageQueue).filter(
+                            WhatsAppMessageQueue.related_invoice_id == invoice.id,
+                            WhatsAppMessageQueue.message_type == 'deadline_alert'
+                        ).first()
+                        
+                        if existing_alert:
+                            logger.info(f"Alert already sent for invoice {invoice.invoice_number}")
+                            continue
+                        
+                        # Generate alert message
+                        customer = invoice.customer
+                        message = f"Dear {customer.first_name}, your invoice #{invoice.invoice_number} for Rs.{invoice.total_amount} is due on {invoice.due_date.strftime('%Y-%m-%d')}. Please make payment before the due date."
+                        
+                        # Enqueue alert message with high priority
+                        WhatsAppQueueService.enqueue_message(
+                            company_id=company_id,
+                            customer_id=str(customer.id),
+                            mobile=customer.phone_1,
+                            message_content=message,
+                            message_type='deadline_alert',
+                            priority=config.default_alert_priority,
+                            related_invoice_id=str(invoice.id)
+                        )
+                        
+                        logger.info(f"Enqueued deadline alert for invoice {invoice.invoice_number}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error creating deadline alert for invoice {invoice.id}: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error in deadline alerts check: {str(e)}")
+
+def reset_whatsapp_quota(app=None):
+    """
+    Reset daily WhatsApp quota at midnight.
+    """
+    logger.info(f"Resetting WhatsApp daily quota: {datetime.now()}")
+    
+    if not app:
+        logger.error("No Flask app provided to reset_whatsapp_quota")
+        return
+    
+    with app.app_context():
+        try:
+            WhatsAppRateLimiter.reset_daily_quota()
+            logger.info("WhatsApp quota reset completed")
+            
+        except Exception as e:
+            logger.error(f"Error resetting WhatsApp quota: {str(e)}")
+
 def init_scheduler(app):
     """
     Initialize the background scheduler with the Flask app context.
@@ -286,6 +478,36 @@ def init_scheduler(app):
         trigger=CronTrigger(day=1, hour=3, minute=0),
         id='backup_cleanup_job',
         name='Cleanup old backups',
+        replace_existing=True
+    )
+    
+    # WhatsApp Queue Processing Job - Run daily at 9:00 AM PKT
+    scheduler.add_job(
+        func=process_whatsapp_queue,
+        args=[app],
+        trigger=CronTrigger(hour=20, minute=14),
+        id='whatsapp_queue_job',
+        name='Process WhatsApp message queue',
+        replace_existing=True
+    )
+    
+    # WhatsApp Deadline Alerts Job - Run daily at 9:00 AM PKT (same time as queue processing)
+    scheduler.add_job(
+        func=check_deadline_alerts,
+        args=[app],
+        trigger=CronTrigger(hour=9, minute=0),
+        id='whatsapp_deadline_alerts_job',
+        name='Check and enqueue deadline alerts',
+        replace_existing=True
+    )
+    
+    # WhatsApp Quota Reset Job - Run daily at midnight
+    scheduler.add_job(
+        func=reset_whatsapp_quota,
+        args=[app],
+        trigger=CronTrigger(hour=0, minute=0),
+        id='whatsapp_quota_reset_job',
+        name='Reset WhatsApp daily quota',
         replace_existing=True
     )
     

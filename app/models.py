@@ -18,6 +18,9 @@ payment_type = ENUM(
 )
 payment_method = ENUM('cash', 'online', 'bank_transfer', 'credit_card', name='payment_method')
 isp_payment_type = ENUM('monthly_subscription', 'bandwidth_usage', 'infrastructure', 'other', name='isp_payment_type')
+whatsapp_message_status = ENUM('pending', 'sent', 'failed', 'failed_permanent', name='whatsapp_message_status')
+whatsapp_message_type = ENUM('invoice', 'deadline_alert', 'custom', 'promotional', name='whatsapp_message_type')
+whatsapp_media_type = ENUM('text', 'image', 'document', name='whatsapp_media_type')
 
 class Company(db.Model):
     __tablename__ = 'companies'
@@ -172,7 +175,7 @@ class Payment(db.Model):
     company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'))
     invoice_id = db.Column(UUID(as_uuid=True), db.ForeignKey('invoices.id'))
     amount = db.Column(db.Numeric(10, 2), nullable=False)
-    payment_date = db.Column(db.Date, nullable=False)
+    payment_date = db.Column(db.DateTime(timezone=True), nullable=False)
     payment_method = db.Column(db.String(50), nullable=False)
     transaction_id = db.Column(db.String(100))
     status = db.Column(db.String(20), nullable=False)
@@ -204,7 +207,7 @@ class ISPPayment(db.Model):
     
     # Financial details
     amount = db.Column(db.Numeric(10, 2), nullable=False)
-    payment_date = db.Column(db.Date, nullable=False)
+    payment_date = db.Column(db.DateTime(timezone=True), nullable=False)
     billing_period = db.Column(db.String(50), nullable=False)
     
     # For usage-based payments
@@ -479,7 +482,7 @@ class Expense(db.Model):
     expense_type_id = db.Column(UUID(as_uuid=True), db.ForeignKey('expense_types.id'), nullable=False)  # Changed from expense_type enum
     description = db.Column(db.Text)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
-    expense_date = db.Column(db.Date, nullable=False)
+    expense_date = db.Column(db.DateTime(timezone=True), nullable=False)
     payment_method = db.Column(db.String(20))
     vendor_payee = db.Column(db.String(255))
     created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
@@ -489,3 +492,214 @@ class Expense(db.Model):
     company = relationship('Company', backref=db.backref('expenses', lazy=True))
     bank_account = relationship('BankAccount', backref=db.backref('expenses', lazy=True))
     expense_type = relationship('ExpenseType', backref=db.backref('expenses', lazy=True))
+
+class ExtraIncomeType(db.Model):
+    __tablename__ = 'extra_income_types'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+
+    company = relationship('Company', backref=db.backref('extra_income_types', lazy=True))
+
+class ExtraIncome(db.Model):
+    __tablename__ = 'extra_incomes'
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'))
+    bank_account_id = db.Column(UUID(as_uuid=True), db.ForeignKey('bank_accounts.id'), nullable=True)
+    income_type_id = db.Column(UUID(as_uuid=True), db.ForeignKey('extra_income_types.id'), nullable=False)
+    description = db.Column(db.Text)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    income_date = db.Column(db.DateTime(timezone=True), nullable=False)
+    payment_method = db.Column(db.String(20))
+    payer = db.Column(db.String(255))
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    is_active = db.Column(db.Boolean, default=True)
+
+    company = relationship('Company', backref=db.backref('extra_incomes', lazy=True))
+    bank_account = relationship('BankAccount', backref=db.backref('extra_incomes', lazy=True))
+    income_type = relationship('ExtraIncomeType', backref=db.backref('extra_incomes', lazy=True))
+
+    
+class WhatsAppMessageQueue(db.Model):
+    """
+    Stores all WhatsApp messages to be sent or already sent.
+    Manages queue with priority ordering and retry logic.
+    """
+    __tablename__ = 'whatsapp_message_queue'
+    
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    customer_id = db.Column(UUID(as_uuid=True), db.ForeignKey('customers.id'), nullable=False)
+    
+    # Message details
+    mobile = db.Column(db.String(20), nullable=False)  # International format e.g., 923001234567
+    message_type = db.Column(whatsapp_message_type, nullable=False, default='custom')
+    message_content = db.Column(db.Text, nullable=False)
+    
+    # Media details (for images/documents)
+    media_type = db.Column(whatsapp_media_type, nullable=False, default='text')
+    media_url = db.Column(db.String(500))  # URL or file path
+    media_caption = db.Column(db.Text)
+    
+    # Queue management
+    priority = db.Column(db.Integer, nullable=False, default=10)  # 0=High, 10=Medium, 20=Low
+    status = db.Column(whatsapp_message_status, nullable=False, default='pending')
+    
+    # Scheduling
+    scheduled_date = db.Column(db.DateTime(timezone=True))
+    sent_at = db.Column(db.DateTime(timezone=True))
+    
+    # Error handling
+    retry_count = db.Column(db.Integer, default=0)
+    max_retry = db.Column(db.Integer, default=3)
+    error_message = db.Column(db.Text)
+    
+    # API response tracking
+    api_response = db.Column(db.JSON)
+    api_message_id = db.Column(db.String(100))  # WhatsApp API's message ID
+    
+    # Related records
+    related_invoice_id = db.Column(UUID(as_uuid=True), db.ForeignKey('invoices.id'))
+    
+    # Timestamps
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    is_active = db.Column(db.Boolean, default=True)
+    
+    # Relationships
+    company = relationship('Company', backref=db.backref('whatsapp_messages', lazy=True))
+    customer = relationship('Customer', backref=db.backref('whatsapp_messages', lazy=True))
+    invoice = relationship('Invoice', backref=db.backref('whatsapp_messages', lazy=True))
+    
+    # Indexes for performance
+    __table_args__ = (
+        db.Index('idx_whatsapp_queue_status_priority', 'status', 'priority'),
+        db.Index('idx_whatsapp_queue_customer', 'customer_id'),
+        db.Index('idx_whatsapp_queue_created', 'created_at'),
+        db.Index('idx_whatsapp_queue_scheduled', 'scheduled_date'),
+    )
+    
+    def __repr__(self):
+        return f'<WhatsAppMessage {self.id} - {self.customer_id} - {self.status}>'
+
+
+class WhatsAppDailyQuota(db.Model):
+    """
+    Tracks daily message sending quota to enforce 200 messages/day limit.
+    Automatically resets at midnight.
+    """
+    __tablename__ = 'whatsapp_daily_quota'
+    
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    
+    # Quota tracking
+    date = db.Column(db.Date, nullable=False, unique=True)  # Date for this quota
+    messages_sent = db.Column(db.Integer, default=0)
+    quota_limit = db.Column(db.Integer, default=200)  # Configurable limit
+    
+    # Timestamps
+    last_reset_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp())
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    
+    # Relationship
+    company = relationship('Company', backref=db.backref('whatsapp_quotas', lazy=True))
+    
+    __table_args__ = (
+        db.Index('idx_whatsapp_quota_date', 'date'),
+    )
+    
+    def __repr__(self):
+        return f'<WhatsAppQuota {self.date} - {self.messages_sent}/{self.quota_limit}>'
+
+
+class WhatsAppTemplate(db.Model):
+    """
+    Stores reusable message templates with placeholder support.
+    Placeholders: {{customer_name}}, {{invoice_number}}, {{amount}}, {{due_date}}, etc.
+    """
+    __tablename__ = 'whatsapp_templates'
+    
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False)
+    
+    # Template details
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    template_text = db.Column(db.Text, nullable=False)
+    
+    # Categorization
+    category = db.Column(db.String(50))  # e.g., 'invoice', 'alert', 'promotional', 'custom'
+    message_type = db.Column(whatsapp_message_type, default='custom')
+    
+    # Settings
+    is_active = db.Column(db.Boolean, default=True)
+    default_priority = db.Column(db.Integer, default=10)
+    
+    # Timestamps
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    created_by = db.Column(UUID(as_uuid=True), db.ForeignKey('users.id'))
+    
+    # Relationships
+    company = relationship('Company', backref=db.backref('whatsapp_templates', lazy=True))
+    creator = relationship('User', backref=db.backref('created_templates', lazy=True))
+    
+    def __repr__(self):
+        return f'<WhatsAppTemplate {self.name}>'
+
+
+class WhatsAppConfig(db.Model):
+    """
+    Stores WhatsApp API configuration and settings.
+    One record per company.
+    """
+    __tablename__ = 'whatsapp_config'
+    
+    id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = db.Column(UUID(as_uuid=True), db.ForeignKey('companies.id'), nullable=False, unique=True)
+    
+    # API Configuration
+    api_key = db.Column(db.String(255), nullable=False)
+    server_address = db.Column(db.String(255), nullable=False)
+    instance_id = db.Column(db.String(100))  # Optional instance ID
+    
+    # Feature toggles
+    auto_send_invoices = db.Column(db.Boolean, default=True)
+    auto_send_deadline_alerts = db.Column(db.Boolean, default=True)
+    
+    # Scheduler settings (stored as time in HH:MM format)
+    message_send_time = db.Column(db.String(5), default='09:00')  # Time to send queued messages
+    deadline_check_time = db.Column(db.String(5), default='09:00')  # Time to check deadline alerts
+    
+    # Alert settings
+    deadline_alert_days_before = db.Column(db.Integer, default=2)  # Alert X days before due date
+    
+    # Quota settings
+    daily_quota_limit = db.Column(db.Integer, default=200)
+    quota_buffer = db.Column(db.Integer, default=5)  # Safety buffer (send max 195)
+    
+    # Default message settings
+    default_invoice_priority = db.Column(db.Integer, default=10)
+    default_alert_priority = db.Column(db.Integer, default=0)
+    default_custom_priority = db.Column(db.Integer, default=20)
+    
+    # Connection status
+    last_connection_test = db.Column(db.TIMESTAMP(timezone=True))
+    connection_status = db.Column(db.String(20), default='untested')  # untested, success, failed
+    
+    # Timestamps
+    created_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp())
+    updated_at = db.Column(db.TIMESTAMP(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    
+    # Relationship
+    company = relationship('Company', backref=db.backref('whatsapp_config', uselist=False, lazy=True))
+    
+    def __repr__(self):
+        return f'<WhatsAppConfig {self.company_id}>'

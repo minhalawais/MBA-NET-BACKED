@@ -1,8 +1,9 @@
 from app import db
-from app.models import Expense,ExpenseType
+from app.models import Expense, ExpenseType
 import uuid
 import logging
 from decimal import Decimal
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +12,7 @@ class ExpenseError(Exception):
 
 class ExpenseTypeError(Exception):
     pass
+
 def get_all_expenses(company_id, user_role):
     try:
         if user_role == 'super_admin':
@@ -49,12 +51,21 @@ def add_expense(data, user_role, current_user_id, ip_address, user_agent):
             if field not in data:
                 raise ValueError(f"Missing required field: {field}")
 
+        # Combine date and time for expense_date
+        expense_date_str = data['expense_date']
+        expense_time_str = data.get('expense_time', '00:00')
+        
+        try:
+            expense_datetime = datetime.strptime(f"{expense_date_str} {expense_time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            raise ValueError("Invalid expense date or time format")
+
         new_expense = Expense(
             company_id=uuid.UUID(data['company_id']),
             expense_type_id=uuid.UUID(data['expense_type_id']),
             description=data.get('description'),
             amount=Decimal(str(data['amount'])),
-            expense_date=data['expense_date'],
+            expense_date=expense_datetime,  # Use combined datetime
             payment_method=data.get('payment_method'),
             vendor_payee=data.get('vendor_payee'),
             bank_account_id=uuid.UUID(data['bank_account_id']) if data.get('bank_account_id') else None,
@@ -80,7 +91,7 @@ def update_expense(id, data, company_id, user_role, current_user_id, ip_address,
             raise ValueError(f"Expense with id {id} not found")
 
         # Update fields
-        updatable_fields = ['expense_type_id', 'description', 'amount', 'expense_date', 'payment_method', 'vendor_payee', 'bank_account_id', 'is_active']
+        updatable_fields = ['expense_type_id', 'description', 'amount', 'payment_method', 'vendor_payee', 'bank_account_id', 'is_active']
         for field in updatable_fields:
             if field in data:
                 if field == 'amount':
@@ -90,12 +101,22 @@ def update_expense(id, data, company_id, user_role, current_user_id, ip_address,
                 else:
                     setattr(expense, field, data[field])
 
+        # Handle expense_date separately to combine date and time
+        if 'expense_date' in data and 'expense_time' in data:
+            expense_datetime = datetime.strptime(f"{data['expense_date']} {data['expense_time']}", "%Y-%m-%d %H:%M")
+            expense.expense_date = expense_datetime
+        elif 'expense_date' in data:
+            existing_time = expense.expense_date.time()
+            expense_date = datetime.strptime(data['expense_date'], "%Y-%m-%d").date()
+            expense.expense_date = datetime.combine(expense_date, existing_time)
+
         db.session.commit()
         return expense
     except Exception as e:
         logger.error(f"Error updating expense {id}: {str(e)}")
         db.session.rollback()
         raise ExpenseError("Failed to update expense")
+
 def delete_expense(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
         if user_role == 'super_admin':
@@ -154,6 +175,31 @@ def add_expense_type(data, user_role, current_user_id, ip_address, user_agent):
         logger.error(f"Error adding expense type: {str(e)}")
         db.session.rollback()
         raise ExpenseTypeError("Failed to create expense type")
+
+def update_expense_type(id, data, company_id, user_role, current_user_id, ip_address, user_agent):
+    try:
+        if user_role == 'super_admin':
+            expense_type = ExpenseType.query.get(id)
+        else:
+            expense_type = ExpenseType.query.filter_by(id=id, company_id=company_id).first()
+
+        if not expense_type:
+            raise ValueError(f"Expense type with id {id} not found")
+
+        # Update fields
+        if 'name' in data:
+            expense_type.name = data['name']
+        if 'description' in data:
+            expense_type.description = data['description']
+        if 'is_active' in data:
+            expense_type.is_active = data['is_active']
+
+        db.session.commit()
+        return expense_type
+    except Exception as e:
+        logger.error(f"Error updating expense type {id}: {str(e)}")
+        db.session.rollback()
+        raise ExpenseTypeError("Failed to update expense type")
 
 def delete_expense_type(id, company_id, user_role, current_user_id, ip_address, user_agent):
     try:
